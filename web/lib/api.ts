@@ -293,7 +293,13 @@ export const certApi = {
   // Orders
   getOrders: (params?: { page?: number; page_size?: number; keyword?: string; aid?: number; status?: number }) =>
     api.get<{ total: number; list: CertOrder[] }>('/cert/orders', params),
-  createOrder: (data: Partial<CertOrder> & { domains: string[] }) => api.post<CertOrder>('/cert/orders', data),
+  createOrder: (data: {
+    account_id: number
+    domains: string[]
+    key_type?: string
+    key_size?: string
+    is_auto?: boolean
+  }) => api.post<CertOrder>('/cert/orders', data),
   processOrder: (id: number, reset?: boolean) => api.post(`/cert/orders/${id}/process`, { reset }),
   deleteOrder: (id: number) => api.delete(`/cert/orders/${id}`),
   getOrderLog: (id: number) => api.get<{ log: string }>(`/cert/orders/${id}/log`),
@@ -642,6 +648,7 @@ export interface CertAccount {
 export interface CertOrder {
   id: number
   aid: number
+  order_kind?: string
   key_type: string
   key_size: string
   process_id?: string
@@ -656,6 +663,7 @@ export interface CertOrder {
   private_key?: string
   created_at: string
   domains?: string[]
+  dns_info?: string
   type_name?: string
   icon?: string
   end_day?: number

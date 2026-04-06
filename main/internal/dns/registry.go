@@ -55,10 +55,29 @@ func GetAllProviderConfigs() map[string]ProviderConfig {
 	return result
 }
 
-// 默认线路映射
 var DefaultLineMapping = map[string]map[string]string{
 	"aliyun":     {"DEF": "default", "CT": "telecom", "CU": "unicom", "CM": "mobile", "AB": "oversea"},
 	"dnspod":     {"DEF": "0", "CT": "10=0", "CU": "10=1", "CM": "10=3", "AB": "3=0"},
 	"huawei":     {"DEF": "default_view", "CT": "Dianxin", "CU": "Liantong", "CM": "Yidong", "AB": "Abroad"},
+	"west":       {"DEF": "", "CT": "LTEL", "CU": "LCNC", "CM": "LMOB", "AB": "LFOR"},
+	"dnsla":      {"DEF": "", "CT": "84613316902921216", "CU": "84613316923892736", "CM": "84613316953252864", "AB": ""},
+	"huoshan":    {"DEF": "default", "CT": "telecom", "CU": "unicom", "CM": "mobile", "AB": "oversea"},
+	"baidu":      {"DEF": "default", "CT": "ct", "CU": "cnc", "CM": "cmnet", "AB": ""},
+	"jdcloud":    {"DEF": "-1", "CT": "1", "CU": "2", "CM": "3", "AB": "4"},
+	"bt":         {"DEF": "0", "CT": "285344768", "CU": "285345792", "CM": "285346816"},
 	"cloudflare": {"DEF": "0"},
+	"namesilo":   {"DEF": "default"},
+	"powerdns":   {"DEF": "default"},
+	"spaceship":  {"DEF": "default"},
+	"aliyunesa":  {"DEF": "0"},
+	"tencenteo":  {"DEF": "Default"},
+}
+
+func DefaultDNSLine(providerType string) string {
+	if m, ok := DefaultLineMapping[providerType]; ok {
+		if v, ok2 := m["DEF"]; ok2 {
+			return v
+		}
+	}
+	return "default"
 }

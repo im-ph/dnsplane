@@ -23,8 +23,8 @@ func init() {
 		Name: "京东云",
 		Icon: "jdcloud.png",
 		Config: []dns.ConfigField{
-			{Name: "AccessKey", Key: "access_key", Type: "input", Required: true},
-			{Name: "SecretKey", Key: "secret_key", Type: "input", Required: true},
+			{Name: "AccessKeyId", Key: "AccessKeyId", Type: "input", Required: true},
+			{Name: "AccessKeySecret", Key: "AccessKeySecret", Type: "input", Required: true},
 			{Name: "使用代理服务器", Key: "proxy", Type: "radio", Options: []dns.ConfigOption{
 				{Value: "0", Label: "否"},
 				{Value: "1", Label: "是"},
@@ -52,10 +52,19 @@ type Provider struct {
 	lastErr   string
 }
 
+func configPick(config map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(config[k]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func NewProvider(config map[string]string, domain, domainID string) dns.Provider {
 	return &Provider{
-		accessKey: config["access_key"],
-		secretKey: config["secret_key"],
+		accessKey: configPick(config, "AccessKeyId", "access_key_id", "access_key"),
+		secretKey: configPick(config, "AccessKeySecret", "secret_access_key", "secret_key", "access_key_secret"),
 		domain:    domain,
 		domainID:  domainID,
 		proxy:     config["proxy"] == "1",

@@ -39,6 +39,32 @@ const KEY_SIZES: Record<string, string[]> = {
   ECC: ['256', '384'],
 }
 
+const orderKindLabel = (kind?: string): string => {
+  switch (kind) {
+    case 'ip':
+      return 'IP (HTTP-01)'
+    case 'mixed':
+      return '混合'
+    case 'dns':
+      return '域名 (DNS-01)'
+    default:
+      return '—'
+  }
+}
+
+const orderKindBadgeClass = (kind?: string): string => {
+  switch (kind) {
+    case 'ip':
+      return 'bg-sky-600 hover:bg-sky-600 text-white border-0'
+    case 'mixed':
+      return 'bg-violet-600 hover:bg-violet-600 text-white border-0'
+    case 'dns':
+      return 'bg-emerald-700/90 hover:bg-emerald-700/90 text-white border-0'
+    default:
+      return 'bg-muted text-muted-foreground'
+  }
+}
+
 const getDaysUntilExpiry = (order: CertOrder): number | null => {
   if (order.end_day !== undefined) return order.end_day
   if (!order.expire_time) return null
@@ -146,14 +172,14 @@ export default function CertPage() {
     }
     const domainList = formData.domains.split('\n').map(d => d.trim()).filter(d => d)
     if (domainList.length === 0) {
-      toast.error('请输入至少一个域名')
+      toast.error('请输入至少一个域名或 IP')
       return
     }
 
     setSubmitting(true)
     try {
       const res = await certApi.createOrder({
-        aid: formData.account_id,
+        account_id: Number(formData.account_id),
         domains: domainList,
         key_type: formData.key_type,
         key_size: formData.key_size,
@@ -366,7 +392,7 @@ export default function CertPage() {
     try {
       // 先创建部署任务
       const createRes = await certApi.createDeploy({
-        account_id: selectedDeployAccount,
+        account_id: Number(selectedDeployAccount),
         order_id: selectedOrder.id,
         remark: `快速部署 - ${selectedOrder.domains?.join(', ')}`
       })
@@ -442,9 +468,12 @@ export default function CertPage() {
   }
 
   const filteredOrders = orders.filter(order => {
-    const matchKeyword = !keyword || 
+    const kindText = orderKindLabel(order.order_kind)
+    const matchKeyword = !keyword ||
       (order.domains && order.domains.some(d => d.includes(keyword))) ||
-      order.issuer?.includes(keyword)
+      order.issuer?.includes(keyword) ||
+      kindText.includes(keyword) ||
+      (order.order_kind && order.order_kind.includes(keyword))
     const matchStatus = statusFilter === 'all' || 
       (statusFilter === 'error' && order.status < 0) ||
       (statusFilter === 'issued' && order.status === 3) ||
@@ -547,7 +576,7 @@ export default function CertPage() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="搜索域名..."
+                placeholder="搜索域名、IP、类型…"
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
                 className="pl-10"
@@ -588,7 +617,7 @@ export default function CertPage() {
           </div>
 
           {loading ? (
-            <TableSkeleton rows={5} columns={8} />
+            <TableSkeleton rows={5} columns={9} />
           ) : filteredOrders.length === 0 ? (
             <EmptyState
               icon={ShieldCheck}
@@ -617,6 +646,11 @@ export default function CertPage() {
                         <div className="font-medium text-sm break-words">
                           {order.domains?.join(', ') || '—'}
                         </div>
+                        {order.order_kind && (
+                          <Badge className={cn('text-[10px] px-1.5 py-0', orderKindBadgeClass(order.order_kind))}>
+                            {orderKindLabel(order.order_kind)}
+                          </Badge>
+                        )}
                         {getStatusBadge(order.status)}
                       </div>
                     </div>
@@ -678,7 +712,8 @@ export default function CertPage() {
                       }}
                     />
                   </TableHead>
-                  <TableHead>域名</TableHead>
+                  <TableHead>域名 / IP</TableHead>
+                  <TableHead className="whitespace-nowrap w-[100px]">类型</TableHead>
                   <TableHead>密钥类型</TableHead>
                   <TableHead>颁发机构</TableHead>
                   <TableHead>状态</TableHead>
@@ -704,12 +739,17 @@ export default function CertPage() {
                       <TableCell>
                         <div className="max-w-[200px]">
                           {order.domains?.slice(0, 2).map((d, i) => (
-                            <div key={i} className="truncate text-sm">{d}</div>
+                            <div key={i} className="truncate text-sm font-mono">{d}</div>
                           ))}
                           {order.domains && order.domains.length > 2 && (
-                            <div className="text-xs text-muted-foreground">等 {order.domains.length} 个域名</div>
+                            <div className="text-xs text-muted-foreground">等 {order.domains.length} 项</div>
                           )}
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge className={cn('text-[10px] px-1.5 py-0', orderKindBadgeClass(order.order_kind))}>
+                          {orderKindLabel(order.order_kind)}
+                        </Badge>
                       </TableCell>
                       <TableCell>
                         <span className="text-sm">{order.key_type} {order.key_size}</span>
@@ -812,14 +852,16 @@ export default function CertPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label>绑定域名 *</Label>
+              <Label>域名或公网 IP *</Label>
               <Textarea
-                placeholder="每行一个域名，支持泛域名如 *.example.com"
+                placeholder={'每行一条。域名示例：example.com 或 *.example.com\nIP 证书示例：203.0.113.10（需 Let\'s Encrypt 等支持 IP 的 ACME；验证为 HTTP-01，需开放 80 端口）'}
                 value={formData.domains}
                 onChange={(e) => setFormData({ ...formData, domains: e.target.value })}
                 rows={5}
               />
-              <p className="text-xs text-muted-foreground">每行一个域名，第一个域名为主域名</p>
+              <p className="text-xs text-muted-foreground">
+                纯域名走 DNS-01（可自动写解析）；公网 IP 走 HTTP-01。混合订单需同时完成 TXT 与 80 端口校验。
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -891,9 +933,15 @@ export default function CertPage() {
                 <div className="space-y-2">
                   <div className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide font-medium">
                     <Globe className="h-3.5 w-3.5" />
-                    证书域名 (SAN)
+                    证书域名 / IP (SAN)
                   </div>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {orderDetail.order_kind && (
+                      <Badge className={cn('text-[10px]', orderKindBadgeClass(orderDetail.order_kind))}>
+                        {orderKindLabel(orderDetail.order_kind)}
+                      </Badge>
+                    )}
+                    <div className="flex flex-wrap gap-1.5">
                     {orderDetail.domains?.map((d, i) => (
                       <Badge key={i} variant="secondary" className="font-mono text-xs px-2 py-0.5">
                         {i === 0 && <ShieldCheck className="h-3 w-3 mr-1 text-emerald-500" />}
@@ -903,8 +951,20 @@ export default function CertPage() {
                     {(!orderDetail.domains || orderDetail.domains.length === 0) && (
                       <span className="text-sm text-muted-foreground">-</span>
                     )}
+                    </div>
                   </div>
                 </div>
+
+                {orderDetail.dns_info && orderDetail.status !== 3 && (
+                  <div className="space-y-2">
+                    <Label className="text-xs text-muted-foreground">验证说明（DNS / HTTP-01）</Label>
+                    <Textarea
+                      value={orderDetail.dns_info}
+                      readOnly
+                      className="font-mono text-xs min-h-[120px] resize-y bg-amber-50/50 dark:bg-amber-950/20 border-amber-200/60 dark:border-amber-900/50"
+                    />
+                  </div>
+                )}
 
                 {/* Info Grid */}
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3 bg-muted/40 rounded-lg p-4">

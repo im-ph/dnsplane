@@ -32,8 +32,10 @@ import (
 	_ "main/internal/dns/providers/dnspod"
 	_ "main/internal/dns/providers/huawei"
 	_ "main/internal/dns/providers/huoshan"
+	_ "main/internal/dns/providers/jdcloud"
 	_ "main/internal/dns/providers/namesilo"
 	_ "main/internal/dns/providers/powerdns"
+	_ "main/internal/dns/providers/spaceship"
 	_ "main/internal/dns/providers/tencenteo"
 	_ "main/internal/dns/providers/west"
 

@@ -19,6 +19,7 @@ import (
 	"io"
 	"main/internal/cert"
 	"math/big"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ func init() {
 		Type: "letsencrypt",
 		Name: "Let's Encrypt",
 		Icon: "letsencrypt.png",
+		Note: "支持域名（DNS-01）与公网 IP（HTTP-01，需在 IP 上开放 80 端口响应校验路径）。",
 		Config: []cert.ConfigField{
 			{Name: "邮箱地址", Key: "email", Type: "input", Required: true},
 		},
@@ -520,9 +522,20 @@ func (c *ACMEClient) CreateOrder(ctx context.Context, domains []string, order *c
 		}
 	}
 
-	identifiers := make([]map[string]string, len(domains))
-	for i, d := range domains {
-		identifiers[i] = map[string]string{"type": "dns", "value": d}
+	identifiers := make([]map[string]string, 0, len(domains))
+	for _, d := range domains {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if ip := net.ParseIP(d); ip != nil {
+			identifiers = append(identifiers, map[string]string{"type": "ip", "value": ip.String()})
+		} else {
+			identifiers = append(identifiers, map[string]string{"type": "dns", "value": d})
+		}
+	}
+	if len(identifiers) == 0 {
+		return nil, fmt.Errorf("ACME 订单缺少有效标识符")
 	}
 
 	payload := map[string]interface{}{
@@ -576,13 +589,28 @@ func (c *ACMEClient) CreateOrder(ctx context.Context, domains []string, order *c
 			return nil, fmt.Errorf("授权响应缺少 identifier 字段")
 		}
 		domain, _ := identifierRaw["value"].(string)
+		idType, _ := identifierRaw["type"].(string)
+		if idType == "" && net.ParseIP(domain) != nil {
+			idType = "ip"
+		} else if idType == "" {
+			idType = "dns"
+		}
 		isWildcard := false
 		if wc, ok := auth["wildcard"]; ok {
 			if wcBool, ok := wc.(bool); ok && wcBool {
 				isWildcard = true
 			}
 		}
-		mainDomain := getMainDomain(domain)
+		var mainDomain string
+		if idType == "ip" {
+			if ip := net.ParseIP(domain); ip != nil {
+				mainDomain = ip.String()
+			} else {
+				mainDomain = domain
+			}
+		} else {
+			mainDomain = getMainDomain(domain)
+		}
 
 		// 用 authURL 作为 key 避免通配符和根域名冲突（两者 domain 相同）
 		challengeKey := fmt.Sprintf("auth_%d_%s", authIdx, domain)
@@ -590,27 +618,35 @@ func (c *ACMEClient) CreateOrder(ctx context.Context, domains []string, order *c
 			challengeKey = "wildcard_" + domain
 		}
 
-		c.log(fmt.Sprintf("授权[%d]: domain=%s wildcard=%v authURL=%s", authIdx, domain, isWildcard, authURL))
+		c.log(fmt.Sprintf("授权[%d]: domain=%s idType=%s wildcard=%v authURL=%s", authIdx, domain, idType, isWildcard, authURL))
 
 		challenges, ok := auth["challenges"].([]interface{})
 		if !ok {
 			return nil, fmt.Errorf("授权响应缺少 challenges 字段")
 		}
+		chosen := false
 		for _, ch := range challenges {
 			challenge, ok := ch.(map[string]interface{})
 			if !ok {
 				continue
 			}
 			chType, _ := challenge["type"].(string)
+			if idType == "ip" && chType != "http-01" {
+				continue
+			}
+			if idType != "ip" && chType != "dns-01" {
+				continue
+			}
 			if chType == "dns-01" {
 				token, _ := challenge["token"].(string)
+				chURL, _ := challenge["url"].(string)
 				keyAuth := c.getKeyAuthorization(token)
 				hash := sha256.Sum256([]byte(keyAuth))
 				txtValue := base64.RawURLEncoding.EncodeToString(hash[:])
 
 				order.Challenges[challengeKey] = cert.Challenge{
 					Type:   "dns-01",
-					URL:    challenge["url"].(string),
+					URL:    chURL,
 					Token:  token,
 					Status: challenge["status"].(string),
 				}
@@ -628,8 +664,33 @@ func (c *ACMEClient) CreateOrder(ctx context.Context, domains []string, order *c
 					Type:  "TXT",
 					Value: txtValue,
 				})
+				chosen = true
 				break
 			}
+			if chType == "http-01" {
+				token, _ := challenge["token"].(string)
+				chURL, _ := challenge["url"].(string)
+				keyAuth := c.getKeyAuthorization(token)
+				order.Challenges[challengeKey] = cert.Challenge{
+					Type:   "http-01",
+					URL:    chURL,
+					Token:  token,
+					Status: challenge["status"].(string),
+				}
+				if _, ok := dnsRecords[mainDomain]; !ok {
+					dnsRecords[mainDomain] = []cert.DNSRecord{}
+				}
+				dnsRecords[mainDomain] = append(dnsRecords[mainDomain], cert.DNSRecord{
+					Name:  token,
+					Type:  "HTTP-01",
+					Value: keyAuth,
+				})
+				chosen = true
+				break
+			}
+		}
+		if !chosen {
+			return nil, fmt.Errorf("ACME 未找到可用挑战: identifier=%s type=%s（域名需 dns-01，IP 需 http-01）", domain, idType)
 		}
 	}
 
@@ -825,11 +886,32 @@ func (c *ACMEClient) FinalizeOrder(ctx context.Context, domains []string, order 
 }
 
 func (c *ACMEClient) createCSR(domains []string, privateKey crypto.PrivateKey) ([]byte, error) {
+	var dnsNames []string
+	var ipAddrs []net.IP
+	for _, d := range domains {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if ip := net.ParseIP(d); ip != nil {
+			ipAddrs = append(ipAddrs, ip)
+		} else {
+			dnsNames = append(dnsNames, d)
+		}
+	}
+	if len(dnsNames)+len(ipAddrs) == 0 {
+		return nil, fmt.Errorf("CSR: 无有效域名或 IP")
+	}
+	cn := strings.TrimSpace(domains[0])
+	if len(dnsNames) > 0 {
+		cn = dnsNames[0]
+	} else {
+		cn = ipAddrs[0].String()
+	}
 	template := &x509.CertificateRequest{
-		Subject: pkix.Name{
-			CommonName: domains[0],
-		},
-		DNSNames: domains,
+		Subject:     pkix.Name{CommonName: cn},
+		DNSNames:    dnsNames,
+		IPAddresses: ipAddrs,
 	}
 	return x509.CreateCertificateRequest(rand.Reader, template, privateKey)
 }

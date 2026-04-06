@@ -13,12 +13,15 @@ import (
 	"main/internal/dns"
 	"main/internal/logger"
 	"main/internal/models"
+	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/idna"
 	"gorm.io/gorm"
 )
 
@@ -220,10 +223,76 @@ type CreateCertOrderRequest struct {
 	IsAuto    bool     `json:"is_auto"`
 }
 
+func validateCertOrderDomains(domains []string) error {
+	if len(domains) == 0 {
+		return fmt.Errorf("至少需要一个域名或 IP")
+	}
+	for _, d := range domains {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			return fmt.Errorf("存在空的域名或 IP")
+		}
+		if net.ParseIP(d) != nil {
+			continue
+		}
+		if len(d) > 253 {
+			return fmt.Errorf("域名过长: %s", d)
+		}
+		if strings.ContainsAny(d, " \t\r\n") {
+			return fmt.Errorf("非法标识: %s", d)
+		}
+	}
+	return nil
+}
+
+func detectCertOrderKind(domains []string) string {
+	var ipN, dnsN int
+	for _, d := range domains {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if net.ParseIP(d) != nil {
+			ipN++
+		} else {
+			dnsN++
+		}
+	}
+	if ipN > 0 && dnsN > 0 {
+		return "mixed"
+	}
+	if ipN > 0 {
+		return "ip"
+	}
+	return "dns"
+}
+
+func certCountChallengeRecords(dnsRecords map[string][]cert.DNSRecord) (dnsLike, http01 int) {
+	for _, records := range dnsRecords {
+		for _, r := range records {
+			if strings.EqualFold(r.Type, "HTTP-01") {
+				http01++
+			} else {
+				dnsLike++
+			}
+		}
+	}
+	return
+}
+
 func CreateCertOrder(c *gin.Context) {
 	var req CreateCertOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "msg": "参数错误"})
+		return
+	}
+
+	normDomains := make([]string, len(req.Domains))
+	for i, d := range req.Domains {
+		normDomains[i] = strings.TrimSpace(d)
+	}
+	if err := validateCertOrderDomains(normDomains); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "msg": err.Error()})
 		return
 	}
 
@@ -239,6 +308,7 @@ func CreateCertOrder(c *gin.Context) {
 		KeyType:   req.KeyType,
 		KeySize:   req.KeySize,
 		IsAuto:    req.IsAuto,
+		OrderKind: detectCertOrderKind(normDomains),
 		Status:    0,
 	}
 
@@ -247,7 +317,7 @@ func CreateCertOrder(c *gin.Context) {
 		return
 	}
 
-	for i, domain := range req.Domains {
+	for i, domain := range normDomains {
 		certDomain := models.CertDomain{
 			OrderID: order.ID,
 			Domain:  domain,
@@ -282,7 +352,7 @@ func CreateCertOrder(c *gin.Context) {
 				order.Status = 1
 				database.DB.Save(&order)
 
-				go processCertOrderAsync(&order, provider, req.Domains, &account)
+				go processCertOrderAsync(&order, provider, normDomains, &account)
 			}
 		}
 	}
@@ -476,19 +546,53 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 	orderInfoBytes, _ := json.Marshal(orderInfo)
 	order.ProcessID = orderInfo.OrderURL
 
-	// 保存DNS验证记录并尝试自动添加
+	useCNAME := false
+	if pc, ok := cert.GetProviderConfig(account.Type); ok && pc.CNAME {
+		useCNAME = true
+	}
+
+	dnsRecCount, http01Count := certCountChallengeRecords(dnsRecords)
+	if http01Count > 0 && dnsRecCount > 0 {
+		appendOrderLog(order, "本订单同时含 DNS 与 HTTP-01：请确保 TXT 与 IP:80 校验路径均已就绪后再继续验证")
+	}
+
+	// 保存DNS验证记录并尝试自动添加（HTTP-01 仅写入说明，不调用 DNS API）
 	dnsInfo := ""
 	addedRecords := 0
 	for domainName, records := range dnsRecords {
-		dnsInfo += "域名 " + domainName + " 需要添加以下DNS记录:\n"
-		for _, r := range records {
+		recs := records
+		if d, ok := certFindDomainByNameIncludingPunycode(domainName); ok {
+			var acc models.Account
+			if database.DB.First(&acc, d.AccountID).Error == nil && acc.Type == "huawei" {
+				recs = mergeHuaweiTXTRecordsForCert(recs)
+				appendOrderLog(order, "华为云 DNS：已按 dnsmgr 规则合并同主机 TXT 验证记录")
+			}
+		}
+
+		headerPrinted := false
+		for _, r := range recs {
+			if strings.EqualFold(r.Type, "HTTP-01") {
+				path := "/.well-known/acme-challenge/" + r.Name
+				dnsInfo += "标识 " + domainName + " [HTTP-01]:\n"
+				dnsInfo += "  URL 路径: " + path + "\n"
+				dnsInfo += "  响应正文（纯文本，仅以下内容）: " + r.Value + "\n\n"
+				appendOrderLog(order, fmt.Sprintf("HTTP-01 - 在 %s 上响应 GET %s ，正文为 key authorization", domainName, path))
+				continue
+			}
+			if !headerPrinted {
+				dnsInfo += "域名 " + domainName + " 需要添加以下DNS记录:\n"
+				headerPrinted = true
+			}
 			dnsInfo += "  记录名: " + r.Name + "\n"
 			dnsInfo += "  记录类型: " + r.Type + "\n"
 			dnsInfo += "  记录值: " + r.Value + "\n"
 			appendOrderLog(order, "DNS验证记录 - "+r.Name+"."+domainName+" -> "+r.Value)
 
-			// 尝试自动添加DNS记录
-			if addDNSRecord(ctx, order, domainName, r.Name, r.Value) {
+			recType := r.Type
+			if recType == "" {
+				recType = "TXT"
+			}
+			if addDNSRecord(ctx, order, domainName, r.Name, r.Value, recType, useCNAME) {
 				addedRecords++
 			}
 		}
@@ -505,17 +609,20 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 		database.DB.Save(account)
 	}
 
-	if addedRecords > 0 {
-		appendOrderLog(order, fmt.Sprintf("已自动添加 %d 条DNS验证记录", addedRecords))
-		appendOrderLog(order, "等待DNS记录生效...")
+	runAutoAuth := addedRecords > 0 || (http01Count > 0 && dnsRecCount == 0 && order.IsAuto)
 
-		// 等待DNS记录生效（30秒）
-		time.Sleep(10 * time.Second)
+	if runAutoAuth {
+		if addedRecords > 0 {
+			appendOrderLog(order, fmt.Sprintf("已自动添加 %d 条DNS验证记录", addedRecords))
+			appendOrderLog(order, "等待DNS记录生效...")
+			time.Sleep(10 * time.Second)
+		} else {
+			appendOrderLog(order, "HTTP-01：将向 CA 发起验证，请确认已对公网开放 80 端口并能返回上述校验内容")
+			time.Sleep(5 * time.Second)
+		}
 
-		// 开始验证流程
-		appendOrderLog(order, "开始DNS验证...")
+		appendOrderLog(order, "开始触发 CA 验证...")
 
-		// 触发验证
 		if err := provider.AuthOrder(ctx, domains, orderInfo); err != nil {
 			appendOrderLog(order, "触发验证失败: "+err.Error())
 			order.Status = -3
@@ -526,7 +633,6 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 
 		appendOrderLog(order, "验证请求已发送，等待验证完成...")
 
-		// 轮询验证状态（最多5分钟）
 		maxAttempts := 10
 		for i := 0; i < maxAttempts; i++ {
 			time.Sleep(10 * time.Second)
@@ -538,12 +644,12 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 			}
 
 			if valid {
-				appendOrderLog(order, "DNS验证成功!")
+				appendOrderLog(order, "授权验证成功")
 				break
 			}
 
 			if i == maxAttempts-1 {
-				appendOrderLog(order, "验证超时，请检查DNS记录是否正确")
+				appendOrderLog(order, "验证超时，请检查 DNS TXT 或 HTTP-01 是否已正确配置")
 				order.Status = -4
 				order.Error = "验证超时"
 				database.DB.Save(order)
@@ -553,7 +659,6 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 			appendOrderLog(order, fmt.Sprintf("等待验证完成 (%d/%d)...", i+1, maxAttempts))
 		}
 
-		// 签发证书
 		appendOrderLog(order, "正在签发证书...")
 		certResult, err := provider.FinalizeOrder(ctx, domains, orderInfo, order.KeyType, order.KeySize)
 		if err != nil {
@@ -564,7 +669,6 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 			return
 		}
 
-		// 保存证书
 		order.FullChain = certResult.FullChain
 		order.PrivateKey = certResult.PrivateKey
 		order.Issuer = certResult.Issuer
@@ -572,95 +676,184 @@ func processCertOrderAsync(order *models.CertOrder, provider cert.Provider, doma
 		expireTime := time.Unix(certResult.ValidTo, 0)
 		order.IssueTime = &issueTime
 		order.ExpireTime = &expireTime
-		order.Status = 3 // 已签发 (3=issued)
+		order.Status = 3
 		database.DB.Save(order)
 
 		appendOrderLog(order, "证书签发成功!")
 		appendOrderLog(order, fmt.Sprintf("颁发机构: %s", certResult.Issuer))
 		appendOrderLog(order, fmt.Sprintf("有效期至: %s", expireTime.Format("2006-01-02")))
 	} else {
-		appendOrderLog(order, "无法自动添加DNS记录，请手动添加上述TXT记录后点击验证按钮")
-		order.Status = 1 // 待验证
+		appendOrderLog(order, "请手动完成验证（DNS TXT 或 HTTP-01，见上方说明）后再次点击处理")
+		order.Status = 1
 		database.DB.Save(order)
 	}
 }
 
-// addDNSRecord 自动添加DNS TXT记录用于证书验证
-func addDNSRecord(ctx context.Context, order *models.CertOrder, mainDomain, recordName, recordValue string) bool {
-	appendOrderLog(order, fmt.Sprintf("尝试自动添加DNS记录: %s.%s", recordName, mainDomain))
+// mergeHuaweiTXTRecordsForCert 对齐 dnsmgr CertDnsUtils::getHuaweiDnsRecords（同 RR 多条 TXT 合并为一条）
+func mergeHuaweiTXTRecordsForCert(records []cert.DNSRecord) []cert.DNSRecord {
+	var nonTXT []cert.DNSRecord
+	byName := make(map[string][]string)
+	var order []string
+	for _, r := range records {
+		if !strings.EqualFold(r.Type, "TXT") {
+			nonTXT = append(nonTXT, r)
+			continue
+		}
+		name := r.Name
+		if _, ok := byName[name]; !ok {
+			order = append(order, name)
+		}
+		byName[name] = append(byName[name], r.Value)
+	}
+	sort.Strings(order)
+	out := append([]cert.DNSRecord{}, nonTXT...)
+	for _, name := range order {
+		vals := byName[name]
+		merged := `"` + strings.Join(vals, `","`) + `"`
+		out = append(out, cert.DNSRecord{Name: name, Type: "TXT", Value: merged})
+	}
+	return out
+}
+
+// certChallengeDomainForCNAME 与 dnsmgr CertDnsUtils 中 CNAME 代理匹配的域名一致
+func certChallengeDomainForCNAME(mainDomain, recordName string) string {
+	if recordName == "_acme-challenge" {
+		return mainDomain
+	}
+	if strings.HasPrefix(recordName, "_acme-challenge.") {
+		sub := strings.TrimPrefix(recordName, "_acme-challenge.")
+		if sub == "" {
+			return mainDomain
+		}
+		return sub + "." + mainDomain
+	}
+	return mainDomain
+}
+
+func certFindDomainByNameIncludingPunycode(name string) (models.Domain, bool) {
 	var domain models.Domain
-	var finalRecordName = recordName
-	if err := database.DB.Where("name = ?", mainDomain).First(&domain).Error; err != nil {
-		found := false
-		recordParts := strings.Split(recordName, ".")
+	if err := database.DB.Where("name = ?", name).First(&domain).Error; err == nil {
+		return domain, true
+	}
+	if strings.HasPrefix(strings.ToLower(name), "xn--") {
+		if u, err := idna.ToUnicode(name); err == nil && u != "" && u != name {
+			if err := database.DB.Where("name = ?", u).First(&domain).Error; err == nil {
+				return domain, true
+			}
+		}
+	}
+	return domain, false
+}
+
+// certResolveCNAMEProxy 将验证记录映射到 CNAME 代理托管区（cert_cnames + domains）
+func certResolveCNAMEProxy(mainDomain, recordName string) (newMain, newRR string, ok bool) {
+	ch := certChallengeDomainForCNAME(mainDomain, recordName)
+	var rr, parent string
+	row := database.DB.Table("cert_cnames AS c").
+		Select("c.rr, d.name").
+		Joins("INNER JOIN domains d ON d.id = c.did AND d.deleted_at IS NULL").
+		Where("c.domain = ?", ch).
+		Limit(1).
+		Row()
+	if err := row.Scan(&rr, &parent); err != nil || rr == "" || parent == "" {
+		return mainDomain, recordName, false
+	}
+	return parent, rr, true
+}
+
+// addDNSRecord 自动添加 DNS 验证记录（对齐 dnsmgr CertDnsUtils::addDns：默认线路、TTL、IDN、CNAME 代理）
+func addDNSRecord(ctx context.Context, order *models.CertOrder, mainDomain, recordName, recordValue, recordType string, useCNAME bool) bool {
+	mainDom := mainDomain
+	finalRecordName := recordName
+	if useCNAME {
+		if nm, rr, ok := certResolveCNAMEProxy(mainDomain, recordName); ok {
+			appendOrderLog(order, fmt.Sprintf("CNAME代理: 验证域 %s → 在托管区 %s 添加记录名 %s", certChallengeDomainForCNAME(mainDomain, recordName), nm, rr))
+			mainDom = nm
+			finalRecordName = rr
+		}
+	}
+
+	appendOrderLog(order, fmt.Sprintf("尝试自动添加DNS记录: %s.%s (%s)", finalRecordName, mainDom, recordType))
+
+	var domain models.Domain
+	var found bool
+	domain, found = certFindDomainByNameIncludingPunycode(mainDom)
+	if !found {
+		recordParts := strings.Split(finalRecordName, ".")
 		if len(recordParts) > 1 {
-			// 提取 _acme-challenge 后面的部分作为子域名
-			subdomainParts := recordParts[1:] // ["7725"]
+			subdomainParts := recordParts[1:]
 			for i := 0; i < len(subdomainParts); i++ {
-				testDomain := strings.Join(subdomainParts[i:], ".") + "." + mainDomain
+				testDomain := strings.Join(subdomainParts[i:], ".") + "." + mainDom
 				appendOrderLog(order, "尝试匹配域名: "+testDomain)
-				if err := database.DB.Where("name = ?", testDomain).First(&domain).Error; err == nil {
+				var d models.Domain
+				var ok bool
+				d, ok = certFindDomainByNameIncludingPunycode(testDomain)
+				if ok {
+					domain = d
 					found = true
-					// 调整记录名：只保留 _acme-challenge 和子域名中不属于托管域名的部分
 					finalRecordName = strings.Join(recordParts[:i+1], ".")
 					appendOrderLog(order, fmt.Sprintf("匹配成功，记录名调整为: %s", finalRecordName))
 					break
 				}
 			}
 		}
-		if !found {
-			var domains []models.Domain
-			database.DB.Find(&domains)
-			fullRecord := recordName + "." + mainDomain
-			for _, d := range domains {
-				if strings.HasSuffix(fullRecord, "."+d.Name) || strings.HasSuffix(fullRecord, d.Name) {
-					domain = d
-					found = true
-					// 计算最终记录名
-					suffix := "." + d.Name
-					if strings.HasSuffix(fullRecord, suffix) {
-						finalRecordName = strings.TrimSuffix(fullRecord, suffix)
-					}
-					appendOrderLog(order, fmt.Sprintf("模糊匹配成功: %s, 记录名: %s", d.Name, finalRecordName))
-					break
+	}
+	if !found {
+		var domains []models.Domain
+		database.DB.Find(&domains)
+		fullRecord := finalRecordName + "." + mainDom
+		for _, d := range domains {
+			if strings.HasSuffix(fullRecord, "."+d.Name) || strings.HasSuffix(fullRecord, d.Name) {
+				domain = d
+				found = true
+				suffix := "." + d.Name
+				if strings.HasSuffix(fullRecord, suffix) {
+					finalRecordName = strings.TrimSuffix(fullRecord, suffix)
 				}
+				appendOrderLog(order, fmt.Sprintf("模糊匹配成功: %s, 记录名: %s", d.Name, finalRecordName))
+				break
 			}
 		}
+	}
 
-		if !found {
-			appendOrderLog(order, "未找到托管域名: "+mainDomain)
-			return false
-		}
+	if !found {
+		appendOrderLog(order, "未找到托管域名: "+mainDom)
+		return false
 	}
 
 	appendOrderLog(order, fmt.Sprintf("找到托管域名: %s (ID: %d)", domain.Name, domain.ID))
 
-	// 获取域名关联的DNS账户
 	var account models.Account
 	if err := database.DB.First(&account, domain.AccountID).Error; err != nil {
 		appendOrderLog(order, "获取DNS账户失败: "+err.Error())
 		return false
 	}
 
-	// 解析账户配置
 	var config map[string]string
 	json.Unmarshal([]byte(account.Config), &config)
 
-	// 获取DNS提供商
 	provider, err := dns.GetProvider(account.Type, config, domain.Name, domain.ThirdID)
 	if err != nil {
 		appendOrderLog(order, "获取DNS提供商失败: "+err.Error())
 		return false
 	}
 
-	// 添加TXT记录
-	recordID, err := provider.AddDomainRecord(ctx, finalRecordName, "TXT", recordValue, "default", 600, 0, nil, "ACME验证记录")
+	line := dns.DefaultDNSLine(account.Type)
+	ttl := 600
+	if account.Type == "namesilo" {
+		ttl = 3600
+	}
+
+	recordID, skipped, err := dns.EnsureChallengeRecord(ctx, provider, finalRecordName, recordType, recordValue, line, ttl, "ACME验证记录")
 	if err != nil {
 		appendOrderLog(order, "添加DNS记录失败: "+err.Error())
 		return false
 	}
-
-	appendOrderLog(order, fmt.Sprintf("DNS记录添加成功 (ID: %s)", recordID))
+	if skipped {
+		appendOrderLog(order, fmt.Sprintf("DNS验证记录已存在（值相同），跳过写入: %s.%s", finalRecordName, domain.Name))
+	} else {
+		appendOrderLog(order, fmt.Sprintf("DNS记录添加成功 (ID: %s)", recordID))
+	}
 	return true
 }
 
@@ -720,6 +913,7 @@ func GetCertOrderDetail(c *gin.Context) {
 		"data": gin.H{
 			"id":          order.ID,
 			"domains":     domainList,
+			"order_kind":  order.OrderKind,
 			"key_type":    order.KeyType,
 			"key_size":    order.KeySize,
 			"status":      order.Status,
@@ -758,6 +952,7 @@ func DownloadCertOrder(c *gin.Context) {
 	}
 	// 清理文件名中的特殊字符
 	filename = strings.ReplaceAll(filename, "*", "_wildcard")
+	filename = strings.ReplaceAll(filename, ":", "_")
 	filename = strings.ReplaceAll(filename, ".", "_")
 
 	switch fileType {
