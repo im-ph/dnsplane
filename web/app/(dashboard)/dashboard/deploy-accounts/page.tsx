@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Plus, Search, MoreHorizontal, Pencil, Trash2, RefreshCw, Loader2, Upload, Rocket } from 'lucide-react'
+import { Plus, Search, MoreHorizontal, Pencil, Trash2, RefreshCw, Loader2, Upload, Rocket, Info } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -14,6 +14,13 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
 import { certApi, api, CertAccount, CertProvider, CertProviderConfig, ProviderConfigField } from '@/lib/api'
+import {
+  evaluateDeployFieldShow,
+  isDeployFieldVisible,
+  mergeProviderFieldDefaults,
+  resolveSelectFieldValue,
+} from '@/lib/deploy-config-form'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { formatDate } from '@/lib/utils'
 import { ProviderBadge } from '@/components/provider-icon'
 import Link from 'next/link'
@@ -53,6 +60,8 @@ export default function DeployAccountsPage() {
           icon: cfg.icon,
           config: cfg.config || [],
           is_deploy: true,
+          note: cfg.note,
+          deploy_note: cfg.deploy_note,
         }))
         setProviders(providerList)
       }
@@ -91,10 +100,12 @@ export default function DeployAccountsPage() {
     } catch {
       // ignore
     }
+    const p = providers.find((x) => x.type === account.type)
+    const merged = mergeProviderFieldDefaults(p?.config, config as Record<string, string>)
     setFormData({
       type: account.type,
       name: account.name,
-      config: config as Record<string, string>,
+      config: merged,
       remark: account.remark || '',
     })
     setDialogOpen(true)
@@ -109,6 +120,15 @@ export default function DeployAccountsPage() {
     if (!formData.type || !formData.name) {
       toast.error('请填写必填项')
       return
+    }
+
+    for (const field of currentProvider?.config || []) {
+      if (!isDeployFieldVisible(field, formData.config)) continue
+      const v = formData.config[field.key]
+      if (field.required && (v === undefined || String(v).trim() === '')) {
+        toast.error(`请填写${field.name}`)
+        return
+      }
     }
 
     setSubmitting(true)
@@ -156,34 +176,36 @@ export default function DeployAccountsPage() {
   const currentProvider = providers.find((p) => p.type === formData.type)
 
   const renderConfigField = (field: ProviderConfigField) => {
-    const value = formData.config[field.key] || field.value || ''
+    const raw = formData.config[field.key]
+    const value = raw ?? field.value ?? ''
 
     if (field.type === 'radio' && field.options) {
+      const v = value || field.value || field.options[0]?.value || ''
       return (
-        <Select
-          value={value}
-          onValueChange={(v) =>
-            setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: v } }))
+        <RadioGroup
+          value={v}
+          onValueChange={(nv) =>
+            setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: nv } }))
           }
+          className="flex flex-wrap gap-4"
         >
-          <SelectTrigger>
-            <SelectValue placeholder={`请选择${field.name}`} />
-          </SelectTrigger>
-          <SelectContent>
-            {field.options.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value}>
+          {field.options.map((opt) => (
+            <div key={opt.value} className="flex items-center space-x-2">
+              <RadioGroupItem value={opt.value} id={`edit-acc-${field.key}-${opt.value}`} />
+              <Label htmlFor={`edit-acc-${field.key}-${opt.value}`} className="font-normal cursor-pointer">
                 {opt.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+              </Label>
+            </div>
+          ))}
+        </RadioGroup>
       )
     }
 
     if (field.type === 'select' && field.options) {
+      const resolved = resolveSelectFieldValue(field, raw)
       return (
         <Select
-          value={value}
+          value={resolved}
           onValueChange={(v) =>
             setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: v } }))
           }
@@ -340,7 +362,7 @@ export default function DeployAccountsPage() {
 
       {/* 编辑弹窗 */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription>修改部署账户配置</DialogDescription>
@@ -353,6 +375,19 @@ export default function DeployAccountsPage() {
               </div>
             </div>
 
+            {currentProvider?.note && (
+              <p className="text-sm text-muted-foreground border-l-2 border-primary/40 pl-3 py-1">{currentProvider.note}</p>
+            )}
+            {currentProvider?.deploy_note && (
+              <div className="flex gap-2 rounded-md border border-amber-200/80 bg-amber-50/80 dark:border-amber-900/50 dark:bg-amber-950/40 px-3 py-2 text-sm text-amber-900 dark:text-amber-100">
+                <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>
+                  <span className="font-medium">部署任务时：</span>
+                  {currentProvider.deploy_note}
+                </span>
+              </div>
+            )}
+
             <div className="space-y-2">
               <Label>账户名称 <span className="text-destructive">*</span></Label>
               <Input
@@ -362,16 +397,18 @@ export default function DeployAccountsPage() {
               />
             </div>
 
-            {currentProvider?.config?.map((field) => (
-              <div key={field.key} className="space-y-2">
-                <Label>
-                  {field.name}
-                  {field.required && <span className="text-destructive">*</span>}
-                </Label>
-                {renderConfigField(field)}
-                {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
-              </div>
-            ))}
+            {currentProvider?.config
+              ?.filter((field) => evaluateDeployFieldShow(field.show, formData.config))
+              ?.map((field) => (
+                <div key={field.key} className="space-y-2">
+                  <Label>
+                    {field.name}
+                    {field.required && <span className="text-destructive">*</span>}
+                  </Label>
+                  {renderConfigField(field)}
+                  {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
+                </div>
+              ))}
 
             <div className="space-y-2">
               <Label>备注</Label>

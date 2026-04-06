@@ -8,6 +8,8 @@ export interface ApiResponse<T = unknown> {
 
 class ApiClient {
   private token: string | null = null
+  /** 并发 401 时合并为单次 refresh，避免 JTI 轮转导致多次刷新互相踩掉 */
+  private refreshInFlight: Promise<boolean> | null = null
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -22,20 +24,91 @@ class ApiClient {
         localStorage.setItem('token', token)
       } else {
         localStorage.removeItem('token')
+        localStorage.removeItem('refresh_token')
       }
     }
   }
 
+  /** 与 OAuth/注册一致：access 给 Authorization，refresh 供 /api/auth/refresh 等使用 */
+  setTokens(tokens: { token: string; refresh_token: string }) {
+    this.token = tokens.token
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('token', tokens.token)
+      localStorage.setItem('refresh_token', tokens.refresh_token)
+    }
+  }
+
+  /** 内存中的 token 可能与 localStorage 脱节（构建时无 window、HMR、多标签页等），请求前对齐 */
+  private syncTokenFromStorage() {
+    if (typeof window === 'undefined') return
+    if (!this.token) {
+      const t = localStorage.getItem('token')
+      if (t) this.token = t
+    }
+  }
+
   getToken() {
+    this.syncTokenFromStorage()
     return this.token
+  }
+
+  /**
+   * 调用 POST /auth/refresh（body 可带 refresh_token；Cookie _rt 同路径也会自动带上）
+   * 不走 request()，避免与 401 处理互相递归
+   */
+  private tryRefreshSession(): Promise<boolean> {
+    if (this.refreshInFlight) {
+      return this.refreshInFlight
+    }
+    this.refreshInFlight = (async () => {
+      try {
+        const rt =
+          typeof window !== 'undefined' ? localStorage.getItem('refresh_token') || '' : ''
+        const res = await fetch(`${API_BASE}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(rt ? { refresh_token: rt } : {}),
+        })
+        if (!res.ok) {
+          return false
+        }
+        const result = (await res.json()) as ApiResponse<{
+          token: string
+          refresh_token: string
+          expires_in?: number
+        }>
+        if (result.code !== 0 || !result.data?.token || !result.data?.refresh_token) {
+          return false
+        }
+        this.setTokens({
+          token: result.data.token,
+          refresh_token: result.data.refresh_token,
+        })
+        return true
+      } catch {
+        return false
+      } finally {
+        this.refreshInFlight = null
+      }
+    })()
+    return this.refreshInFlight
+  }
+
+  private pathForAuthPolicy(fullUrl: string) {
+    const q = fullUrl.indexOf('?')
+    return q === -1 ? fullUrl : fullUrl.slice(0, q)
   }
 
   private async request<T>(
     method: string,
     url: string,
     data?: unknown,
-    options?: RequestInit
+    options?: RequestInit,
+    _retryAfterRefresh = false
   ): Promise<ApiResponse<T>> {
+    this.syncTokenFromStorage()
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }
@@ -47,6 +120,7 @@ class ApiClient {
     const config: RequestInit = {
       method,
       headers,
+      credentials: 'include',
       ...options,
     }
 
@@ -55,8 +129,23 @@ class ApiClient {
     }
 
     const response = await fetch(`${API_BASE}${url}`, config)
-    
+
     if (response.status === 401) {
+      const path = this.pathForAuthPolicy(url)
+      const noRefresh =
+        _retryAfterRefresh ||
+        path === '/auth/refresh' ||
+        path === '/login' ||
+        path === '/install' ||
+        path === '/install/status'
+
+      if (!noRefresh) {
+        const refreshed = await this.tryRefreshSession()
+        if (refreshed) {
+          return this.request<T>(method, url, data, options, true)
+        }
+      }
+
       this.setToken(null)
       if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
         window.location.href = '/login'
@@ -111,7 +200,7 @@ export function encryptedPost<T = unknown>(
 // Auth APIs
 export const authApi = {
   login: (data: { username: string; password: string; captcha_id?: string; captcha?: string; totp_code?: string }) =>
-    api.post<{ token: string; user: User }>('/login', data),
+    api.post<{ token: string; refresh_token: string; expires_in?: number; user: User }>('/login', data),
   logout: () => api.post('/logout'),
   getCaptcha: () => api.get<{ captcha_id: string; captcha_image: string }>('/auth/captcha'),
   getConfig: () => api.get<{ captcha_enabled: boolean; totp_enabled: boolean }>('/auth/config'),
@@ -258,6 +347,26 @@ export const logApi = {
     api.get<{ total: number; list: OperationLog[] }>('/logs', params),
 }
 
+export interface SystemInfo {
+  version?: string
+  go_version?: string
+  os?: string
+  arch?: string
+  num_cpu?: number
+  goroutines?: number
+  memory_alloc?: number
+  memory_sys?: number
+  data_db_size?: number
+  logs_db_size?: number
+  request_db_size?: number
+  db_maintenance?: {
+    last_vacuum?: string
+    next_vacuum?: string
+    main_db?: { size_text?: string }
+    [key: string]: unknown
+  }
+}
+
 // System APIs
 export const systemApi = {
   getConfig: () => api.get<SystemConfig>('/system/config'),
@@ -272,6 +381,7 @@ export const systemApi = {
   getCronConfig: () => api.get<CronConfig>('/system/cron'),
   updateCronConfig: (data: CronConfig) => api.post('/system/cron', data),
   getDNSProviders: () => api.get<DNSProvider[]>('/dns/providers'),
+  getSystemInfo: () => api.get<SystemInfo>('/dashboard/system/info'),
 }
 
 // Dashboard APIs
@@ -587,6 +697,10 @@ export interface CertProvider {
   name: string
   icon?: string
   config: ProviderConfigField[]
+  /** 部署方式说明（账户表单 / 列表展示） */
+  note?: string
+  /** 仅部署任务侧：无表单项时的提示 */
+  deploy_note?: string
   max_domains?: number
   wildcard?: boolean
   cname?: boolean
@@ -675,6 +789,9 @@ export interface DashboardStats {
   dmonitor_active: number
   dmonitor_status_0: number
   dmonitor_status_1: number
+  optimizeip_active?: number
+  optimizeip_status_1?: number
+  optimizeip_status_2?: number
   certorder_status_3: number
   certorder_status_5: number
   certorder_status_6: number

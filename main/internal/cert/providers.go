@@ -178,12 +178,12 @@ func registerDeployProviders() {
 		DeployNote: "请确保路径存在且有写入权限，Windows路径使用/代替\\，且路径以/开头",
 	})
 
-	// 阿里云CDN
+	// 阿里云CDN（DeployConfig 与 deploy/config_cloud.go 中 aliyun_cdn 的 TaskInputs 一致）
 	Register("aliyun_cdn", nil, ProviderConfig{
 		Type:     "aliyun_cdn",
 		Name:     "阿里云",
 		Icon:     "aliyun.png",
-		Note:     "支持部署到阿里云CDN、OSS、WAF等服务",
+		Note:     "部署证书到阿里云 CDN/DCDN（专用通道，与控制台「阿里云」多产品账户区分）",
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "AccessKeyId", Key: "access_key_id", Type: "input", Required: true},
@@ -195,16 +195,37 @@ func registerDeployProviders() {
 			},
 		},
 		DeployConfig: []ConfigField{
-			{Name: "绑定的域名", Key: "domain", Type: "textarea", Placeholder: "填写要部署证书的域名，多个可用逗号或换行分隔", Required: true},
+			{Name: "域名", Key: "domains", Type: "textarea", Placeholder: "每行一个域名", Required: true},
 		},
 	})
 
-	// 腾讯云CDN
+	// 阿里云 DCDN（与 CDN 通道共用实现，账户类型为 aliyun + product=dcdn 时解析为此部署器）
+	Register("aliyun_dcdn", nil, ProviderConfig{
+		Type:     "aliyun_dcdn",
+		Name:     "阿里云 DCDN",
+		Icon:     "aliyun.png",
+		Note:     "部署证书到阿里云全站加速 DCDN（与 CDN 接口相同）",
+		IsDeploy: true,
+		Config: []ConfigField{
+			{Name: "AccessKeyId", Key: "access_key_id", Type: "input", Required: true},
+			{Name: "AccessKeySecret", Key: "access_key_secret", Type: "input", Required: true},
+			{
+				Name: "使用代理服务器", Key: "proxy", Type: "radio",
+				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
+				Value:   "0",
+			},
+		},
+		DeployConfig: []ConfigField{
+			{Name: "域名", Key: "domains", Type: "textarea", Placeholder: "每行一个域名", Required: true},
+		},
+	})
+
+	// 腾讯云（与 deploy/config_cloud 及 dnsmgr tencent.php 能力对齐：按产品部署到 CDN / EdgeOne / CLB 等）
 	Register("tencent_cdn", nil, ProviderConfig{
 		Type:     "tencent_cdn",
 		Name:     "腾讯云",
 		Icon:     "tencent.png",
-		Note:     "支持部署到腾讯云CDN、EO、CLB、COS、TKE、SCF等服务",
+		Note:     "支持部署到腾讯云 CDN、EdgeOne(EO)、CLB、COS、WAF、TKE、SCF、轻量、DDoS 等；请在任务中选择产品与实例/域名",
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "SecretId", Key: "secret_id", Type: "input", Required: true},
@@ -216,56 +237,114 @@ func registerDeployProviders() {
 			},
 		},
 		DeployConfig: []ConfigField{
-			{Name: "绑定的域名", Key: "domain", Type: "textarea", Placeholder: "填写要部署证书的域名，多个可用逗号或换行分隔", Required: true},
+			{Name: "要部署的产品", Key: "product", Type: "select", Required: true, Value: "cdn", Options: []ConfigOption{
+				{Value: "cdn", Label: "内容分发网络 CDN"},
+				{Value: "teo", Label: "边缘安全加速 EdgeOne(EO)"},
+				{Value: "waf", Label: "Web应用防火墙 WAF"},
+				{Value: "cos", Label: "对象存储 COS"},
+				{Value: "clb", Label: "负载均衡 CLB"},
+				{Value: "live", Label: "云直播 LIVE"},
+				{Value: "vod", Label: "云点播 VOD"},
+				{Value: "tke", Label: "容器服务 TKE"},
+				{Value: "scf", Label: "云函数 SCF"},
+				{Value: "lighthouse", Label: "轻量应用服务器"},
+				{Value: "ddos", Label: "DDoS 高防包"},
+				{Value: "upload", Label: "仅上传到证书管理"},
+			}},
+			{Name: "所属地域ID", Key: "regionid", Type: "input", Placeholder: "如: ap-guangzhou", Show: "product=='clb'||product=='cos'||product=='tke'||product=='scf'||product=='lighthouse'", Required: true},
+			{Name: "WAF 地域", Key: "region", Type: "input", Placeholder: "如: ap-guangzhou（与控制台地域一致）", Show: "product=='waf'", Required: true},
+			{Name: "负载均衡 ID", Key: "clb_id", Type: "input", Show: "product=='clb'", Required: true},
+			{Name: "监听器 ID", Key: "clb_listener_id", Type: "input", Show: "product=='clb'"},
+			{Name: "SNI 域名", Key: "clb_domain", Type: "input", Placeholder: "开启 SNI 时填写规则域名", Show: "product=='clb'"},
+			{Name: "存储桶名称", Key: "cos_bucket", Type: "input", Show: "product=='cos'", Required: true},
+			{Name: "EO 站点类型", Key: "site_type", Type: "select", Value: "cn", Options: []ConfigOption{
+				{Value: "cn", Label: "中国站"},
+				{Value: "intl", Label: "国际站(teo.intl)"},
+			}, Show: "product=='teo'"},
+			{Name: "站点 ID (ZoneId)", Key: "site_id", Type: "input", Show: "product=='teo'", Required: true},
+			{Name: "TKE 集群 ID", Key: "tke_cluster_id", Type: "input", Show: "product=='tke'", Required: true},
+			{Name: "TKE 命名空间", Key: "tke_namespace", Type: "input", Show: "product=='tke'", Required: true},
+			{Name: "TKE Secret 名称", Key: "tke_secret", Type: "input", Show: "product=='tke'", Required: true},
+			{Name: "实例 ID", Key: "lighthouse_id", Type: "input", Placeholder: "轻量实例 ID 或 DDoS 实例 ID", Show: "product=='lighthouse'||product=='ddos'", Required: true},
+			{Name: "绑定的域名", Key: "domain", Type: "textarea", Placeholder: "多个域名用逗号或换行分隔；CDN/EO/WAF 等填加速域名", Show: "product!='clb'&&product!='upload'&&product!='tke'", Required: true},
 		},
 	})
 
-	// AWS CloudFront
+	// AWS CloudFront（与 deploy/config_cloud.go 中 aws_cloudfront TaskInputs 一致；未填分发 ID 时可用订单域名自动查找）
 	Register("aws_cloudfront", nil, ProviderConfig{
 		Type:     "aws_cloudfront",
 		Name:     "AWS CloudFront",
 		Icon:     "aws.png",
-		Note:     "部署证书到CloudFront",
+		Note:     "部署证书到 AWS CloudFront CDN 分发",
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "AccessKeyId", Key: "access_key_id", Type: "input", Required: true},
 			{Name: "AccessKeySecret", Key: "access_key_secret", Type: "input", Required: true},
 		},
 		DeployConfig: []ConfigField{
-			{Name: "分发ID", Key: "distribution_id", Type: "input", Placeholder: "CloudFront Distribution ID"},
-			{Name: "域名", Key: "domain", Type: "input", Placeholder: "用于自动查找分发ID的域名"},
+			{Name: "分发ID", Key: "distribution_id", Type: "input", Placeholder: "留空则仅上传证书到ACM；也可留空由订单域名查找分发"},
 		},
 	})
 
-	// 七牛云CDN
+	// AWS ACM（与 CloudFront 通道共用实现；统一账户 aws + product=acm 时解析为此部署器）
+	Register("aws_acm", nil, ProviderConfig{
+		Type:     "aws_acm",
+		Name:     "AWS Certificate Manager",
+		Icon:     "aws.png",
+		Note:     "导入证书到 us-east-1 的 ACM（与 CloudFront 使用同一实现；可不关联 CloudFront 分发）",
+		IsDeploy: true,
+		Config: []ConfigField{
+			{Name: "AccessKeyId", Key: "access_key_id", Type: "input", Required: true},
+			{Name: "AccessKeySecret", Key: "access_key_secret", Type: "input", Required: true},
+		},
+		DeployConfig: []ConfigField{
+			{Name: "分发ID", Key: "distribution_id", Type: "input", Placeholder: "留空则仅导入 ACM，不更新 CloudFront"},
+		},
+	})
+
+	// 七牛云（DeployConfig 与 deploy/config_cloud.go 中 qiniu TaskInputs 一致）
 	Register("qiniu", nil, ProviderConfig{
 		Type:     "qiniu",
 		Name:     "七牛云",
 		Icon:     "qiniu.png",
-		Note:     "部署证书到七牛云CDN",
+		Note:     "支持部署到七牛云 CDN / OSS 等",
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "AccessKey", Key: "access_key", Type: "input", Required: true},
 			{Name: "SecretKey", Key: "secret_key", Type: "input", Required: true},
+			{
+				Name: "使用代理服务器", Key: "proxy", Type: "radio",
+				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
+				Value:   "0",
+			},
 		},
 		DeployConfig: []ConfigField{
-			{Name: "域名", Key: "domain", Type: "input", Placeholder: "要部署证书的CDN域名"},
+			{Name: "要部署的产品", Key: "product", Type: "select", Required: true, Value: "cdn", Options: []ConfigOption{
+				{Value: "cdn", Label: "CDN"},
+				{Value: "oss", Label: "OSS"},
+				{Value: "upload", Label: "上传到证书管理"},
+			}},
+			{Name: "绑定的域名", Key: "domain", Type: "input", Placeholder: "多个域名可使用,分隔", Show: "product!='upload'", Required: true},
 		},
 	})
 
-	// 又拍云CDN
+	// 又拍云（与 deploy/config_cloud.go：无 TaskInputs，由订单域名注入后绑定）
 	Register("upyun", nil, ProviderConfig{
 		Type:     "upyun",
 		Name:     "又拍云",
 		Icon:     "upyun.png",
-		Note:     "部署证书到又拍云CDN",
+		Note:     "支持部署到又拍云 CDN",
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "Token", Key: "token", Type: "input", Required: true},
+			{
+				Name: "使用代理服务器", Key: "proxy", Type: "radio",
+				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
+				Value:   "0",
+			},
 		},
-		DeployConfig: []ConfigField{
-			{Name: "域名", Key: "domain", Type: "input", Placeholder: "要部署证书的CDN域名"},
-		},
+		DeployConfig: []ConfigField{},
+		DeployNote:   "系统会根据关联SSL证书的域名自动更新",
 	})
 
 	// 本地部署
@@ -307,7 +386,7 @@ func registerDeployProviders() {
 		DeployNote: "请确保路径存在且有写入权限，支持路径变量 {domain}",
 	})
 
-	// 雷池WAF
+	// 雷池WAF（与 deploy/config_selfhosted.go：TaskInputs 为空，由任务注入订单域名）
 	Register("safeline", nil, ProviderConfig{
 		Type:     "safeline",
 		Name:     "雷池WAF",
@@ -323,31 +402,40 @@ func registerDeployProviders() {
 				Value:   "0",
 			},
 		},
-		DeployConfig: []ConfigField{
-			{Name: "域名列表", Key: "domainList", Type: "textarea", Placeholder: "填写要更新证书的域名，多个用逗号分隔"},
-		},
-		DeployNote: "系统会根据关联SSL证书的域名，自动更新对应证书",
+		DeployConfig: []ConfigField{},
+		DeployNote:   "系统会根据关联SSL证书的域名自动更新",
 	})
 
-	// 1Panel
+	// 1Panel（账户字段与 deploy/config_selfhosted opanel 对齐：key；DeployConfig 与 TaskInputs 对齐）
 	Register("1panel", nil, ProviderConfig{
 		Type:     "1panel",
 		Name:     "1Panel",
 		Icon:     "1panel.png",
-		Note:     "部署证书到1Panel面板",
+		Note:     "更新 1Panel 证书管理内的 SSL 证书",
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "面板地址", Key: "url", Type: "input", Placeholder: "如: http://192.168.1.100:8090", Required: true},
-			{Name: "API密钥", Key: "api_key", Type: "input", Required: true},
+			{Name: "接口密钥", Key: "key", Type: "input", Placeholder: "1Panel API 接口密钥", Required: true},
+			{Name: "API版本", Key: "version", Type: "select", Options: []ConfigOption{
+				{Value: "v1", Label: "1.x (v1)"},
+				{Value: "v2", Label: "2.x (v2)"},
+			}, Value: "v2"},
 			{
 				Name: "使用代理服务器", Key: "proxy", Type: "radio",
 				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
 				Value:   "0",
 			},
 		},
+		DeployConfig: []ConfigField{
+			{Name: "部署类型", Key: "type", Type: "radio", Required: true, Options: []ConfigOption{
+				{Value: "0", Label: "更新已有证书"},
+				{Value: "3", Label: "面板本身"},
+			}, Value: "0"},
+			{Name: "证书ID", Key: "id", Type: "input", Placeholder: "在证书列表查看ID", Show: "type==0"},
+		},
 	})
 
-	// Cdnfly
+	// Cdnfly（DeployConfig 与 deploy/config_selfhosted.go TaskInputs 一致）
 	Register("cdnfly", nil, ProviderConfig{
 		Type:     "cdnfly",
 		Name:     "Cdnfly",
@@ -364,9 +452,12 @@ func registerDeployProviders() {
 				Value:   "0",
 			},
 		},
+		DeployConfig: []ConfigField{
+			{Name: "证书ID", Key: "id", Type: "input", Placeholder: "留空则为添加证书"},
+		},
 	})
 
-	// LeCDN
+	// LeCDN（DeployConfig 与 deploy/config_selfhosted.go TaskInputs 一致）
 	Register("lecdn", nil, ProviderConfig{
 		Type:     "lecdn",
 		Name:     "LeCDN",
@@ -382,25 +473,38 @@ func registerDeployProviders() {
 				Value:   "0",
 			},
 		},
+		DeployConfig: []ConfigField{
+			{Name: "证书ID", Key: "id", Type: "input", Placeholder: "留空则为添加证书"},
+		},
 	})
 
-	// GoEdge
+	// GoEdge（与 deploy/config_selfhosted.go：账户字段 accessKeyId/accessKey + TaskNote）
 	Register("goedge", nil, ProviderConfig{
 		Type:     "goedge",
 		Name:     "GoEdge",
 		Icon:     "goedge.png",
-		Note:     "部署证书到GoEdge/FlexCDN",
+		Note:     "支持 GoEdge 与 FlexCDN",
 		IsDeploy: true,
 		Config: []ConfigField{
-			{Name: "API地址", Key: "url", Type: "input", Placeholder: "如: https://goedge.example.com", Required: true},
-			{Name: "Access Key", Key: "access_key", Type: "input", Required: true},
-			{Name: "Access Secret", Key: "access_secret", Type: "input", Required: true},
+			{Name: "HTTP API地址", Key: "url", Type: "input", Placeholder: "如: https://goedge.example.com", Required: true},
+			{Name: "AccessKey ID", Key: "accessKeyId", Type: "input", Required: true},
+			{Name: "AccessKey密钥", Key: "accessKey", Type: "input", Required: true},
+			{Name: "用户类型", Key: "usertype", Type: "radio", Options: []ConfigOption{
+				{Value: "user", Label: "平台用户"},
+				{Value: "admin", Label: "系统用户"},
+			}, Value: "user"},
+			{Name: "系统类型", Key: "systype", Type: "radio", Options: []ConfigOption{
+				{Value: "0", Label: "GoEdge"},
+				{Value: "1", Label: "FlexCDN"},
+			}, Value: "0"},
 			{
 				Name: "使用代理服务器", Key: "proxy", Type: "radio",
 				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
 				Value:   "0",
 			},
 		},
+		DeployConfig: []ConfigField{},
+		DeployNote:   "系统会根据关联SSL证书的域名自动更新",
 	})
 
 	// Kangle用户
@@ -496,37 +600,41 @@ func registerDeployProviders() {
 			},
 		},
 		DeployConfig: []ConfigField{
-			{Name: "证书描述", Key: "desc", Type: "input", Placeholder: "用于匹配或新建证书描述"},
+			{Name: "群晖证书描述", Key: "desc", Type: "input", Placeholder: "留空则根据证书通用名匹配"},
 		},
 	})
 
-	// Lucky
+	// Lucky（与 deploy/config_selfhosted.go Inputs / TaskNote）
 	Register("lucky", nil, ProviderConfig{
 		Type:     "lucky",
 		Name:     "Lucky",
 		Icon:     "lucky.png",
-		Note:     "部署Lucky证书",
+		Note:     "更新 Lucky 证书",
 		IsDeploy: true,
 		Config: []ConfigField{
-			{Name: "Lucky地址", Key: "url", Type: "input", Placeholder: "如: http://192.168.1.100:16601", Required: true},
-			{Name: "API Token", Key: "token", Type: "input", Required: true},
+			{Name: "面板地址", Key: "url", Type: "input", Placeholder: "如: http://192.168.1.100:16601", Required: true},
+			{Name: "安全入口", Key: "path", Type: "input", Placeholder: "如有路径前缀则填写"},
+			{Name: "OpenToken", Key: "opentoken", Type: "input", Required: true},
 			{
 				Name: "使用代理服务器", Key: "proxy", Type: "radio",
 				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
 				Value:   "0",
 			},
 		},
+		DeployConfig: []ConfigField{},
+		DeployNote:   "系统会根据关联SSL证书的域名自动更新",
 	})
 
-	// 飞牛OS
+	// 飞牛OS（与 deploy/config_selfhosted：无 TaskInputs，依赖订单域名）
 	Register("fnos", nil, ProviderConfig{
 		Type:     "fnos",
 		Name:     "飞牛OS",
 		Icon:     "fnos.png",
-		Note:     "部署飞牛OS的证书",
+		Note:     "更新飞牛OS的证书",
 		IsDeploy: true,
 		Config: []ConfigField{
-			{Name: "API地址", Key: "url", Type: "input", Placeholder: "如: http://192.168.1.100:5000", Required: true},
+			{Name: "主机地址", Key: "host", Type: "input", Placeholder: "如: 192.168.1.100", Required: true},
+			{Name: "SSH端口", Key: "port", Type: "input", Value: "22", Required: true},
 			{Name: "用户名", Key: "username", Type: "input", Required: true},
 			{Name: "密码", Key: "password", Type: "input", Required: true},
 			{
@@ -535,25 +643,29 @@ func registerDeployProviders() {
 				Value:   "0",
 			},
 		},
+		DeployConfig: []ConfigField{},
+		DeployNote:   "系统会根据关联SSL证书的域名自动更新",
 	})
 
-	// Proxmox VE
+	// Proxmox VE（与 deploy/config_selfhosted.go Inputs / TaskInputs）
 	Register("proxmox", nil, ProviderConfig{
 		Type:     "proxmox",
 		Name:     "Proxmox VE",
 		Icon:     "proxmox.png",
-		Note:     "部署到PVET证书",
+		Note:     "部署到 PVE 节点",
 		IsDeploy: true,
 		Config: []ConfigField{
-			{Name: "PVE地址", Key: "url", Type: "input", Placeholder: "如: https://192.168.1.100:8006", Required: true},
-			{Name: "用户名", Key: "username", Type: "input", Placeholder: "如: root@pam", Required: true},
-			{Name: "密码", Key: "password", Type: "input", Required: true},
-			{Name: "节点名称", Key: "node", Type: "input", Placeholder: "默认: pve", Value: "pve"},
+			{Name: "面板地址", Key: "url", Type: "input", Placeholder: "如: https://192.168.1.100:8006", Required: true},
+			{Name: "API令牌ID", Key: "api_user", Type: "input", Required: true},
+			{Name: "API令牌密钥", Key: "api_key", Type: "input", Required: true},
 			{
 				Name: "使用代理服务器", Key: "proxy", Type: "radio",
 				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
 				Value:   "0",
 			},
+		},
+		DeployConfig: []ConfigField{
+			{Name: "节点名称", Key: "node", Type: "input", Placeholder: "如: pve", Required: true},
 		},
 	})
 
@@ -592,7 +704,7 @@ func registerDeployProviders() {
 		},
 	})
 
-	// 小皮面板
+	// 小皮面板（与 deploy/config_selfhosted 中 xp：url/apikey + TaskInputs sites；部署注册名 xp / xpanel）
 	Register("xpanel", nil, ProviderConfig{
 		Type:     "xpanel",
 		Name:     "小皮面板",
@@ -601,27 +713,7 @@ func registerDeployProviders() {
 		IsDeploy: true,
 		Config: []ConfigField{
 			{Name: "面板地址", Key: "url", Type: "input", Placeholder: "如: http://192.168.1.100:9080", Required: true},
-			{Name: "用户名", Key: "username", Type: "input", Required: true},
-			{Name: "密码", Key: "password", Type: "input", Required: true},
-			{
-				Name: "使用代理服务器", Key: "proxy", Type: "radio",
-				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
-				Value:   "0",
-			},
-		},
-	})
-
-	// 华为云CDN
-	Register("huawei_cdn", nil, ProviderConfig{
-		Type:     "huawei_cdn",
-		Name:     "华为云",
-		Icon:     "huawei.png",
-		Note:     "支持部署到华为云CDN、WAF、ELB等服务",
-		IsDeploy: true,
-		Config: []ConfigField{
-			{Name: "Access Key ID", Key: "access_key_id", Type: "input", Required: true},
-			{Name: "Secret Access Key", Key: "access_key_secret", Type: "input", Required: true},
-			{Name: "Endpoint", Key: "endpoint", Type: "input", Value: "cdn.myhuaweicloud.com"},
+			{Name: "接口密钥", Key: "apikey", Type: "input", Required: true},
 			{
 				Name: "使用代理服务器", Key: "proxy", Type: "radio",
 				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
@@ -629,37 +721,49 @@ func registerDeployProviders() {
 			},
 		},
 		DeployConfig: []ConfigField{
-			{Name: "绑定的域名", Key: "domain", Type: "textarea", Placeholder: "填写要部署证书的域名，多个可用逗号或换行分隔", Required: true},
-			{
-				Name: "强制HTTPS", Key: "force_https", Type: "radio",
-				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
-				Value:   "0",
-			},
-			{
-				Name: "启用HTTP/2", Key: "http2", Type: "radio",
-				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
-				Value:   "1",
-			},
-			{Name: "证书名称", Key: "cert_name", Type: "input", Placeholder: "留空自动生成"},
+			{Name: "网站名称列表", Key: "sites", Type: "textarea", Placeholder: "每行一个网站名称", Required: true},
 		},
 	})
 
-	// UCloud
-	Register("ucloud", nil, ProviderConfig{
-		Type:     "ucloud",
-		Name:     "UCloud",
-		Icon:     "ucloud.png",
-		Note:     "部署证书到UCloud CDN",
+	// 华为云CDN（DeployConfig 与 deploy/config_cloud.go 中 huawei_cdn TaskInputs 一致）
+	Register("huawei_cdn", nil, ProviderConfig{
+		Type:     "huawei_cdn",
+		Name:     "华为云",
+		Icon:     "huawei.png",
+		Note:     "部署证书到华为云 CDN",
 		IsDeploy: true,
 		Config: []ConfigField{
-			{Name: "公钥", Key: "public_key", Type: "input", Required: true},
-			{Name: "私钥", Key: "private_key", Type: "input", Required: true},
-			{Name: "项目ID", Key: "project_id", Type: "input", Required: true},
+			{Name: "Access Key", Key: "access_key", Type: "input", Required: true},
+			{Name: "Secret Key", Key: "secret_key", Type: "input", Required: true},
 			{
 				Name: "使用代理服务器", Key: "proxy", Type: "radio",
 				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
 				Value:   "0",
 			},
+		},
+		DeployConfig: []ConfigField{
+			{Name: "域名", Key: "domains", Type: "textarea", Placeholder: "每行一个域名", Required: true},
+		},
+	})
+
+	// UCloud（DeployConfig 与 deploy/config_cloud.go 中 ucloud TaskInputs 一致；部署实现注册为 ucloud_cdn）
+	Register("ucloud", nil, ProviderConfig{
+		Type:     "ucloud",
+		Name:     "UCloud",
+		Icon:     "ucloud.png",
+		Note:     "部署证书到 UCloud UCDN",
+		IsDeploy: true,
+		Config: []ConfigField{
+			{Name: "公钥", Key: "public_key", Type: "input", Required: true},
+			{Name: "私钥", Key: "private_key", Type: "input", Required: true},
+			{
+				Name: "使用代理服务器", Key: "proxy", Type: "radio",
+				Options: []ConfigOption{{Value: "0", Label: "否"}, {Value: "1", Label: "是"}},
+				Value:   "0",
+			},
+		},
+		DeployConfig: []ConfigField{
+			{Name: "云分发资源ID", Key: "domain_id", Type: "input", Required: true},
 		},
 	})
 }

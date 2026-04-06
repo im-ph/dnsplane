@@ -15,7 +15,14 @@ import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { toast } from 'sonner'
 import { certApi, CertDeploy, CertAccount, CertOrder, CertProviderConfig, ProviderConfigField } from '@/lib/api'
-import { Upload, Plus, Search, RefreshCw, Trash2, Play, CheckCircle, XCircle, Clock, Server, Settings } from 'lucide-react'
+import {
+  evaluateDeployFieldShow,
+  isDeployFieldVisible,
+  mergeProviderFieldDefaults,
+  resolveSelectFieldValue,
+} from '@/lib/deploy-config-form'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Upload, Plus, Search, RefreshCw, Trash2, Play, CheckCircle, XCircle, Clock, Server, Settings, Info } from 'lucide-react'
 import Link from 'next/link'
 
 const DEPLOY_STATUS_MAP: Record<number, { label: string; color: string; icon: React.ReactNode }> = {
@@ -82,7 +89,7 @@ export default function DeployPage() {
     }
   }
 
-  // 根据选中的账户获取deploy_config
+  // 根据选中的账户获取 deploy_config
   const currentDeployConfig = useMemo(() => {
     if (!formData.account_id) return []
     const account = accounts.find(a => a.id.toString() === formData.account_id)
@@ -91,52 +98,51 @@ export default function DeployPage() {
     return provider?.deploy_config || []
   }, [formData.account_id, accounts, providers])
 
-  // 评估条件显示
-  const evaluateShow = (show: string | undefined, config: Record<string, string>) => {
-    if (!show) return true
-    try {
-      const showCondition = show.replace(/(\w+)/g, (match) => {
-        if (config.hasOwnProperty(match)) {
-          return `"${config[match]}"`
-        }
-        return match
-      })
-      return eval(showCondition)
-    } catch {
-      return true
-    }
+  const currentDeployProvider = useMemo(() => {
+    if (!formData.account_id) return undefined
+    const account = accounts.find(a => a.id.toString() === formData.account_id)
+    if (!account) return undefined
+    return providers[account.type]
+  }, [formData.account_id, accounts, providers])
+
+  const applyAccountDeployDefaults = (accountId: string, base: Record<string, string> = {}) => {
+    const account = accounts.find(a => a.id.toString() === accountId)
+    const fields = account ? providers[account.type]?.deploy_config : undefined
+    return mergeProviderFieldDefaults(fields, base)
   }
 
   // 渲染配置字段
   const renderConfigField = (field: ProviderConfigField) => {
-    const value = formData.config[field.key] || field.value || ''
+    const raw = formData.config[field.key]
+    const value = raw ?? field.value ?? ''
 
     if (field.type === 'radio' && field.options) {
+      const v = value || field.value || field.options[0]?.value || ''
       return (
-        <Select
-          value={value}
-          onValueChange={(v) =>
-            setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: v } }))
+        <RadioGroup
+          value={v}
+          onValueChange={(nv) =>
+            setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: nv } }))
           }
+          className="flex flex-wrap gap-4"
         >
-          <SelectTrigger>
-            <SelectValue placeholder={`请选择${field.name}`} />
-          </SelectTrigger>
-          <SelectContent>
-            {field.options.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value}>
+          {field.options.map((opt) => (
+            <div key={opt.value} className="flex items-center space-x-2">
+              <RadioGroupItem value={opt.value} id={`deploy-${field.key}-${opt.value}`} />
+              <Label htmlFor={`deploy-${field.key}-${opt.value}`} className="font-normal cursor-pointer">
                 {opt.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+              </Label>
+            </div>
+          ))}
+        </RadioGroup>
       )
     }
 
     if (field.type === 'select' && field.options) {
+      const resolved = resolveSelectFieldValue(field, raw)
       return (
         <Select
-          value={value}
+          value={resolved}
           onValueChange={(v) =>
             setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: v } }))
           }
@@ -156,6 +162,7 @@ export default function DeployPage() {
     }
 
     if (field.type === 'textarea') {
+      const rows = field.key === 'domains' || field.key === 'sites' ? 6 : field.key === 'domain' ? 4 : 4
       return (
         <Textarea
           value={value}
@@ -163,7 +170,8 @@ export default function DeployPage() {
             setFormData((prev) => ({ ...prev, config: { ...prev.config, [field.key]: e.target.value } }))
           }
           placeholder={field.placeholder}
-          rows={3}
+          rows={rows}
+          className="min-h-[96px] font-mono text-sm"
         />
       )
     }
@@ -198,10 +206,13 @@ export default function DeployPage() {
     } catch {
       // ignore
     }
+    const acc = accounts.find((a) => a.id === deploy.aid)
+    const fields = acc ? providers[acc.type]?.deploy_config : undefined
+    const merged = mergeProviderFieldDefaults(fields, config as Record<string, string>)
     setFormData({
       account_id: deploy.aid.toString(),
       order_id: deploy.oid.toString(),
-      config: config as Record<string, string>,
+      config: merged,
       remark: deploy.remark || '',
     })
     setShowEditDialog(true)
@@ -213,9 +224,10 @@ export default function DeployPage() {
       return
     }
 
-    // 验证必填字段
     for (const field of currentDeployConfig) {
-      if (field.required && !formData.config[field.key]) {
+      if (!isDeployFieldVisible(field, formData.config)) continue
+      const v = formData.config[field.key]
+      if (field.required && (v === undefined || String(v).trim() === '')) {
         toast.error(`请填写${field.name}`)
         return
       }
@@ -536,7 +548,7 @@ export default function DeployPage() {
 
       {/* Add Dialog */}
       <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>添加部署任务</DialogTitle>
             <DialogDescription>创建新的SSL证书部署任务</DialogDescription>
@@ -544,7 +556,16 @@ export default function DeployPage() {
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>部署账户 *</Label>
-              <Select value={formData.account_id} onValueChange={(v) => setFormData({ ...formData, account_id: v, config: {} })}>
+              <Select
+                value={formData.account_id}
+                onValueChange={(v) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    account_id: v,
+                    config: applyAccountDeployDefaults(v, {}),
+                  }))
+                }
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="选择部署账户" />
                 </SelectTrigger>
@@ -578,18 +599,32 @@ export default function DeployPage() {
                 <p className="text-xs text-muted-foreground">暂无已签发的证书订单</p>
               )}
             </div>
-            
-            {/* 部署配置字段 */}
-            {currentDeployConfig.filter(field => evaluateShow(field.show, formData.config)).map((field) => (
-              <div key={field.key} className="space-y-2">
-                <Label>
-                  {field.name}
-                  {field.required && <span className="text-destructive ml-1">*</span>}
-                </Label>
-                {renderConfigField(field)}
-                {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
+
+            {currentDeployProvider?.note && (
+              <p className="text-sm text-muted-foreground border-l-2 border-primary/40 pl-3 py-1">
+                {currentDeployProvider.note}
+              </p>
+            )}
+            {currentDeployProvider?.deploy_note && (
+              <div className="flex gap-2 rounded-md border border-amber-200/80 bg-amber-50/80 dark:border-amber-900/50 dark:bg-amber-950/40 px-3 py-2 text-sm text-amber-900 dark:text-amber-100">
+                <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{currentDeployProvider.deploy_note}</span>
               </div>
-            ))}
+            )}
+
+            {/* 部署配置字段 */}
+            {currentDeployConfig
+              .filter((field) => evaluateDeployFieldShow(field.show, formData.config))
+              .map((field) => (
+                <div key={field.key} className="space-y-2">
+                  <Label>
+                    {field.name}
+                    {field.required && <span className="text-destructive ml-1">*</span>}
+                  </Label>
+                  {renderConfigField(field)}
+                  {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
+                </div>
+              ))}
 
             <div className="space-y-2">
               <Label>备注</Label>
@@ -612,7 +647,7 @@ export default function DeployPage() {
 
       {/* Edit Dialog */}
       <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>编辑部署任务</DialogTitle>
             <DialogDescription>修改部署任务配置</DialogDescription>
@@ -620,7 +655,16 @@ export default function DeployPage() {
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>部署账户 *</Label>
-              <Select value={formData.account_id} onValueChange={(v) => setFormData({ ...formData, account_id: v, config: {} })}>
+              <Select
+                value={formData.account_id}
+                onValueChange={(v) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    account_id: v,
+                    config: applyAccountDeployDefaults(v, {}),
+                  }))
+                }
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="选择部署账户" />
                 </SelectTrigger>
@@ -649,17 +693,31 @@ export default function DeployPage() {
               </Select>
             </div>
 
-            {/* 部署配置字段 */}
-            {currentDeployConfig.filter(field => evaluateShow(field.show, formData.config)).map((field) => (
-              <div key={field.key} className="space-y-2">
-                <Label>
-                  {field.name}
-                  {field.required && <span className="text-destructive ml-1">*</span>}
-                </Label>
-                {renderConfigField(field)}
-                {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
+            {currentDeployProvider?.note && (
+              <p className="text-sm text-muted-foreground border-l-2 border-primary/40 pl-3 py-1">
+                {currentDeployProvider.note}
+              </p>
+            )}
+            {currentDeployProvider?.deploy_note && (
+              <div className="flex gap-2 rounded-md border border-amber-200/80 bg-amber-50/80 dark:border-amber-900/50 dark:bg-amber-950/40 px-3 py-2 text-sm text-amber-900 dark:text-amber-100">
+                <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{currentDeployProvider.deploy_note}</span>
               </div>
-            ))}
+            )}
+
+            {/* 部署配置字段 */}
+            {currentDeployConfig
+              .filter((field) => evaluateDeployFieldShow(field.show, formData.config))
+              .map((field) => (
+                <div key={field.key} className="space-y-2">
+                  <Label>
+                    {field.name}
+                    {field.required && <span className="text-destructive ml-1">*</span>}
+                  </Label>
+                  {renderConfigField(field)}
+                  {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
+                </div>
+              ))}
 
             <div className="space-y-2">
               <Label>备注</Label>

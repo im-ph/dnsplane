@@ -1,9 +1,11 @@
 package servers
 
 import (
-	"main/internal/cert/deploy/base"
 	"context"
+	"crypto/tls"
 	"fmt"
+	"main/internal/cert/deploy/base"
+	"net"
 	"strings"
 	"time"
 
@@ -44,7 +46,19 @@ func (p *FTPProvider) connect() (*ftp.ServerConn, error) {
 	username := p.GetString("username")
 	password := p.GetString("password")
 
-	conn, err := ftp.Dial(host+":"+port, ftp.DialWithTimeout(10*time.Second))
+	addr := net.JoinHostPort(host, port)
+	opts := []ftp.DialOption{ftp.DialWithTimeout(10 * time.Second)}
+	if p.GetString("secure") == "1" {
+		opts = append(opts, ftp.DialWithExplicitTLS(&tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: host,
+		}))
+	}
+	if p.GetString("passive") == "0" {
+		opts = append(opts, ftp.DialWithDisabledEPSV(true))
+	}
+
+	conn, err := ftp.Dial(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("FTP连接失败: %w", err)
 	}
@@ -58,8 +72,18 @@ func (p *FTPProvider) connect() (*ftp.ServerConn, error) {
 }
 
 func (p *FTPProvider) Deploy(ctx context.Context, fullchain, privateKey string, config map[string]interface{}) error {
-	certPath := p.GetStringFrom(config, "cert_path")
-	keyPath := p.GetStringFrom(config, "key_path")
+	format := strings.TrimSpace(firstStringInMap(config, "format"))
+	if format == "pfx" || format == "jks" {
+		return fmt.Errorf("FTP 部署当前仅支持 PEM 格式")
+	}
+	certPath := firstStringInMap(config, "cert_path", "pem_cert_file")
+	if certPath == "" {
+		certPath = p.GetStringFrom(config, "cert_path")
+	}
+	keyPath := firstStringInMap(config, "key_path", "pem_key_file")
+	if keyPath == "" {
+		keyPath = p.GetStringFrom(config, "key_path")
+	}
 
 	conn, err := p.connect()
 	if err != nil {
@@ -96,9 +120,8 @@ func (p *FTPProvider) Deploy(ctx context.Context, fullchain, privateKey string, 
 }
 
 func (p *FTPProvider) uploadFile(conn *ftp.ServerConn, remotePath, content string) error {
-	dir := remotePath[:strings.LastIndex(remotePath, "/")]
-	if dir != "" {
-		conn.MakeDir(dir)
+	if i := strings.LastIndex(remotePath, "/"); i > 0 {
+		conn.MakeDir(remotePath[:i])
 	}
 
 	return conn.Stor(remotePath, strings.NewReader(content))

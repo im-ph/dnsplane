@@ -35,11 +35,19 @@ type GoEdgeProvider struct {
 
 // NewGoEdgeProvider 创建GoEdge部署器
 func NewGoEdgeProvider(config map[string]interface{}) base.DeployProvider {
+	accessKeyID := base.GetConfigString(config, "accessKeyId")
+	if accessKeyID == "" {
+		accessKeyID = base.GetConfigString(config, "access_key")
+	}
+	accessKey := base.GetConfigString(config, "accessKey")
+	if accessKey == "" {
+		accessKey = base.GetConfigString(config, "access_secret")
+	}
 	return &GoEdgeProvider{
 		BaseProvider: base.BaseProvider{Config: config},
 		panelURL:     strings.TrimSuffix(base.GetConfigString(config, "url"), "/"),
-		accessKeyID:  base.GetConfigString(config, "accessKeyId"),
-		accessKey:    base.GetConfigString(config, "accessKey"),
+		accessKeyID:  accessKeyID,
+		accessKey:    accessKey,
 		userType:     base.GetConfigString(config, "usertype"),
 		sysType:      base.GetConfigString(config, "systype"),
 		client:       &http.Client{Timeout: 30 * time.Second},

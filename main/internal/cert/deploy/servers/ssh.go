@@ -1,10 +1,10 @@
 package servers
 
 import (
-	"main/internal/cert/deploy/base"
 	"context"
 	"fmt"
 	"io"
+	"main/internal/cert/deploy/base"
 	"net"
 	"strings"
 	"time"
@@ -45,16 +45,31 @@ func (p *SSHProvider) connect() (*ssh.Client, error) {
 	}
 	username := p.GetString("username")
 	authType := p.GetString("auth_type")
+	if authType == "" {
+		if p.GetString("auth") == "1" {
+			authType = "key"
+		} else {
+			authType = "password"
+		}
+	}
 	credential := ""
 	if authType == "key" {
-		credential = p.GetString("private_key")
+		credential = firstStringInMap(p.Config, "private_key", "privatekey")
 	} else {
 		credential = p.GetString("password")
 	}
 
+	passphrase := p.GetString("passphrase")
+
 	var auth []ssh.AuthMethod
 	if authType == "key" {
-		signer, err := ssh.ParsePrivateKey([]byte(credential))
+		var signer ssh.Signer
+		var err error
+		if passphrase != "" {
+			signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(credential), []byte(passphrase))
+		} else {
+			signer, err = ssh.ParsePrivateKey([]byte(credential))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("解析私钥失败: %w", err)
 		}
@@ -80,10 +95,23 @@ func (p *SSHProvider) connect() (*ssh.Client, error) {
 }
 
 func (p *SSHProvider) Deploy(ctx context.Context, fullchain, privateKey string, config map[string]interface{}) error {
-	certPath := p.GetStringFrom(config, "cert_path")
-	keyPath := p.GetStringFrom(config, "key_path")
+	format := strings.TrimSpace(firstStringInMap(config, "format"))
+	if format == "pfx" || format == "jks" {
+		return fmt.Errorf("SSH 部署当前仅支持 PEM 格式（与 dnsmgr 表单中的 PEM 选项一致）")
+	}
+	certPath := firstStringInMap(config, "cert_path", "pem_cert_file")
+	if certPath == "" {
+		certPath = p.GetStringFrom(config, "cert_path")
+	}
+	keyPath := firstStringInMap(config, "key_path", "pem_key_file")
+	if keyPath == "" {
+		keyPath = p.GetStringFrom(config, "key_path")
+	}
 	cmdPre := p.GetStringFrom(config, "cmd_pre")
-	restartCmd := p.GetStringFrom(config, "cmd")
+	restartCmd := firstStringInMap(config, "cmd", "restart_cmd")
+	if restartCmd == "" {
+		restartCmd = p.GetStringFrom(config, "cmd")
+	}
 
 	client, err := p.connect()
 	if err != nil {
@@ -91,9 +119,9 @@ func (p *SSHProvider) Deploy(ctx context.Context, fullchain, privateKey string, 
 	}
 	defer client.Close()
 
-	if cmdPre != "" {
-		p.Log("正在执行上传前命令")
-		if err := p.runCommand(client, cmdPre); err != nil {
+	for _, line := range splitExecLines(cmdPre) {
+		p.Log("正在执行上传前命令: " + line)
+		if err := p.runCommand(client, line); err != nil {
 			return fmt.Errorf("执行上传前命令失败: %w", err)
 		}
 	}
@@ -122,11 +150,14 @@ func (p *SSHProvider) Deploy(ctx context.Context, fullchain, privateKey string, 
 		}
 	}
 
-	if restartCmd != "" {
-		p.Log("正在执行上传后命令")
-		if err := p.runCommand(client, restartCmd); err != nil {
+	restartLines := splitExecLines(restartCmd)
+	for _, line := range restartLines {
+		p.Log("正在执行上传后命令: " + line)
+		if err := p.runCommand(client, line); err != nil {
 			return fmt.Errorf("执行重启命令失败: %w", err)
 		}
+	}
+	if len(restartLines) > 0 {
 		p.Log("命令执行成功")
 	}
 
@@ -141,8 +172,8 @@ func (p *SSHProvider) uploadFile(client *ssh.Client, remotePath, content string,
 	}
 	defer session.Close()
 
-	dir := remotePath[:strings.LastIndex(remotePath, "/")]
-	if dir != "" {
+	if i := strings.LastIndex(remotePath, "/"); i > 0 {
+		dir := remotePath[:i]
 		mkdirSession, _ := client.NewSession()
 		mkdirSession.Run("mkdir -p " + dir)
 		mkdirSession.Close()

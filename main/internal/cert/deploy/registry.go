@@ -55,11 +55,13 @@ func GetProvider(accountType string, accConfig map[string]interface{}, taskConfi
 		}
 	}
 
-	// 4. 尝试 "{type}_cdn" 作为默认子产品
-	defaultKey := accountType + "_cdn"
-	provider, err = base.GetProvider(defaultKey, accConfig)
-	if err == nil {
-		return provider, nil
+	// 4. 常见子产品后缀回退（如 AWS 控制台默认 acm 而非 cdn；仅 _cdn 会解析失败）
+	for _, suffix := range []string{"cdn", "acm", "cloudfront"} {
+		key := accountType + "_" + suffix
+		provider, err = base.GetProvider(key, accConfig)
+		if err == nil {
+			return provider, nil
+		}
 	}
 
 	return nil, fmt.Errorf("unknown deploy provider: %s", accountType)

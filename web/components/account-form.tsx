@@ -12,6 +12,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { toast } from 'sonner'
 import { ProviderConfigField } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import {
+  evaluateDeployFieldShow,
+  isDeployFieldVisible,
+  resolveSelectFieldValue,
+} from '@/lib/deploy-config-form'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 
 // 提供商分类配置
 const DNS_CATEGORIES: Record<string, string[]> = {
@@ -27,10 +33,40 @@ const CERT_CATEGORIES: Record<string, string[]> = {
 }
 
 const DEPLOY_CATEGORIES: Record<string, string[]> = {
-  '远程部署': ['ssh', 'ftp', 'btpanel', '1panel', 'synology', 'pve', 'mwpanel', 'ratpanel'],
-  '本地部署': ['local'],
-  'CDN部署': ['aliyun_cdn', 'tencent_cdn', 'huawei_cdn', 'qiniu', 'upyun', 'aws'],
-  '其他部署': ['k8s', 'safeline'],
+  '远程与本地': ['ssh', 'ftp', 'local'],
+  '面板 / 编排': [
+    'btpanel',
+    '1panel',
+    'synology',
+    'mwpanel',
+    'ratpanel',
+    'chopsticks',
+    'xpanel',
+    'kangle',
+    'kangle_admin',
+    'goedge',
+    'cdnfly',
+    'lecdn',
+    'lucky',
+    'fnos',
+    'proxmox',
+    'k8s',
+    'btwaf',
+    'baolei',
+    'opanel',
+  ],
+  'CDN / 云': [
+    'aliyun_cdn',
+    'tencent_cdn',
+    'huawei_cdn',
+    'qiniu',
+    'upyun',
+    'aws_cloudfront',
+    'ucloud',
+    'ucloud_cdn',
+    'safeline',
+    'aws',
+  ],
 }
 
 // 提供商图标和颜色配置
@@ -68,6 +104,7 @@ const providerStyles: Record<string, { color: string; bgColor: string; icon: str
   '1panel': { color: '#1976D2', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: '1P', image: '/icons/opanel.png' },
   synology: { color: '#FF9800', bgColor: 'bg-orange-50 dark:bg-orange-950', icon: '群', image: '/icons/synology.png' },
   pve: { color: '#E57000', bgColor: 'bg-orange-50 dark:bg-orange-950', icon: 'PV', image: '/icons/proxmox.ico' },
+  proxmox: { color: '#E57000', bgColor: 'bg-orange-50 dark:bg-orange-950', icon: 'PV', image: '/icons/proxmox.ico' },
   k8s: { color: '#326CE5', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: 'K8', image: '/icons/cloud.png' },
   aws: { color: '#FF9900', bgColor: 'bg-orange-50 dark:bg-orange-950', icon: 'AW', image: '/icons/aws.png' },
   ftp: { color: '#795548', bgColor: 'bg-amber-50 dark:bg-amber-950', icon: 'FT', image: '/icons/server2.png' },
@@ -81,6 +118,18 @@ const providerStyles: Record<string, { color: string; bgColor: string; icon: str
   ksyun: { color: '#0066FF', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: '金', image: '/icons/ksyun.ico' },
   lucky: { color: '#FF5722', bgColor: 'bg-orange-50 dark:bg-orange-950', icon: 'LK', image: '/icons/lucky.png' },
   fnos: { color: '#2196F3', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: 'FN', image: '/icons/fnos.png' },
+  opanel: { color: '#1976D2', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: '1P', image: '/icons/opanel.png' },
+  aws_cloudfront: { color: '#FF9900', bgColor: 'bg-orange-50 dark:bg-orange-950', icon: 'CF', image: '/icons/aws.png' },
+  chopsticks: { color: '#8D6E63', bgColor: 'bg-amber-50 dark:bg-amber-950', icon: '筷', image: '/icons/bt.png' },
+  xpanel: { color: '#00ACC1', bgColor: 'bg-cyan-50 dark:bg-cyan-950', icon: 'XP', image: '/icons/host.png' },
+  goedge: { color: '#5C6BC0', bgColor: 'bg-indigo-50 dark:bg-indigo-950', icon: 'GE', image: '/icons/waf.png' },
+  cdnfly: { color: '#7E57C2', bgColor: 'bg-purple-50 dark:bg-purple-950', icon: 'CF', image: '/icons/waf.png' },
+  lecdn: { color: '#26A69A', bgColor: 'bg-teal-50 dark:bg-teal-950', icon: 'LE', image: '/icons/waf.png' },
+  btwaf: { color: '#20A53A', bgColor: 'bg-green-50 dark:bg-green-950', icon: 'BW', image: '/icons/bt.png' },
+  baolei: { color: '#D32F2F', bgColor: 'bg-red-50 dark:bg-red-950', icon: '堡', image: '/icons/waf.png' },
+  ucloud_cdn: { color: '#4A90E2', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: 'UC', image: '/icons/ucloud.ico' },
+  kangle: { color: '#0288D1', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: 'KA', image: '/icons/host.png' },
+  kangle_admin: { color: '#0277BD', bgColor: 'bg-blue-50 dark:bg-blue-950', icon: 'K+', image: '/icons/host.png' },
 }
 
 export interface Provider {
@@ -88,6 +137,7 @@ export interface Provider {
   name: string
   icon?: string
   note?: string
+  deploy_note?: string
   config: ProviderConfigField[]
 }
 
@@ -112,53 +162,44 @@ function ConfigField({
   onChange: (key: string, value: string) => void
   allConfig: Record<string, string>
 }) {
-  // 处理条件显示
-  if (field.show) {
-    try {
-      const showCondition = field.show.replace(/(\w+)/g, (match) => {
-        if (allConfig.hasOwnProperty(match)) {
-          return `"${allConfig[match]}"`
-        }
-        return match
-      })
-      if (!eval(showCondition)) return null
-    } catch {
-      // 忽略条件解析错误
-    }
-  }
+  if (!evaluateDeployFieldShow(field.show, allConfig)) return null
 
   if (field.type === 'radio' && field.options) {
+    const v = value || field.value || field.options[0]?.value || ''
     return (
       <div className="space-y-2">
-        <Label htmlFor={`config-${field.key}`}>
+        <Label>
           {field.name}
           {field.required && <span className="text-destructive ml-1">*</span>}
         </Label>
-        <Select value={value} onValueChange={(v) => onChange(field.key, v)}>
-          <SelectTrigger id={`config-${field.key}`}>
-            <SelectValue placeholder={`请选择${field.name}`} />
-          </SelectTrigger>
-          <SelectContent>
-            {field.options.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value}>
+        <RadioGroup
+          value={v}
+          onValueChange={(nv) => onChange(field.key, nv)}
+          className="flex flex-wrap gap-4"
+        >
+          {field.options.map((opt) => (
+            <div key={opt.value} className="flex items-center space-x-2">
+              <RadioGroupItem value={opt.value} id={`acc-${field.key}-${opt.value}`} />
+              <Label htmlFor={`acc-${field.key}-${opt.value}`} className="font-normal cursor-pointer">
                 {opt.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+              </Label>
+            </div>
+          ))}
+        </RadioGroup>
         {field.note && <p className="text-xs text-muted-foreground">{field.note}</p>}
       </div>
     )
   }
 
   if (field.type === 'select' && field.options) {
+    const resolved = resolveSelectFieldValue(field, value)
     return (
       <div className="space-y-2">
         <Label htmlFor={`config-${field.key}`}>
           {field.name}
           {field.required && <span className="text-destructive ml-1">*</span>}
         </Label>
-        <Select value={value} onValueChange={(v) => onChange(field.key, v)}>
+        <Select value={resolved} onValueChange={(v) => onChange(field.key, v)}>
           <SelectTrigger id={`config-${field.key}`}>
             <SelectValue placeholder={field.placeholder || `请选择${field.name}`} />
           </SelectTrigger>
@@ -333,7 +374,9 @@ export function AccountForm({ type, providers, onSubmit, backUrl, title, descrip
     // 验证必填字段
     const requiredFields = currentProvider?.config?.filter((f) => f.required) || []
     for (const field of requiredFields) {
-      if (!formData.config[field.key]) {
+      if (!isDeployFieldVisible(field, formData.config)) continue
+      const v = formData.config[field.key]
+      if (v === undefined || String(v).trim() === '') {
         toast.error(`请填写${field.name}`)
         return
       }
@@ -461,11 +504,17 @@ export function AccountForm({ type, providers, onSubmit, backUrl, title, descrip
               />
             </div>
 
+            {currentProvider?.deploy_note && type === 'deploy' && (
+              <div className="p-3 rounded-lg border border-amber-200/80 bg-amber-50/80 dark:border-amber-900/50 dark:bg-amber-950/40 text-sm text-amber-900 dark:text-amber-100">
+                <strong className="mr-1">任务说明：</strong>
+                {currentProvider.deploy_note}
+              </div>
+            )}
             {currentProvider?.note && (
               <div className="p-4 bg-blue-50 dark:bg-blue-950 rounded-lg">
                 <p className="text-sm text-blue-700 dark:text-blue-300">
                   <strong>提示：</strong>
-                  <span dangerouslySetInnerHTML={{ __html: currentProvider.note }} />
+                  {currentProvider.note}
                 </p>
               </div>
             )}

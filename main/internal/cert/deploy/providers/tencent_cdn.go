@@ -32,7 +32,7 @@ func tencentHmacSHA256(key []byte, data string) []byte {
 }
 
 func init() {
-	// 注册统一的腾讯云部署器，支持CDN/EO/CLB/COS等全部产品
+	// 注册统一的腾讯云部署器，支持CDN/EO/CLB/COS等全部产品（GetProvider 按 tencent_{product} 解析）
 	base.Register("tencent_cdn", NewTencentProvider)
 	base.Register("tencent_teo", NewTencentProvider)
 	base.Register("tencent_clb", NewTencentProvider)
@@ -43,6 +43,8 @@ func init() {
 	base.Register("tencent_tke", NewTencentProvider)
 	base.Register("tencent_scf", NewTencentProvider)
 	base.Register("tencent_upload", NewTencentProvider)
+	base.Register("tencent_lighthouse", NewTencentProvider)
+	base.Register("tencent_ddos", NewTencentProvider)
 }
 
 // TencentProvider 腾讯云统一证书部署器
@@ -164,9 +166,9 @@ func (p *TencentProvider) deployCommon(fullchain, privateKey, product string, co
 		}
 	}
 
-	// 确定 region
+	// 确定 region（与 PHP dnsmgr 一致：COS/TKE/WAF/SCF/轻量等需指定地域）
 	region := ""
-	if product == "cos" || product == "tke" || product == "waf" || product == "scf" {
+	if product == "cos" || product == "tke" || product == "waf" || product == "scf" || product == "lighthouse" {
 		region = base.GetConfigString(config, "regionid")
 		if region == "" {
 			region = base.GetConfigString(config, "region")
@@ -235,6 +237,15 @@ func (p *TencentProvider) buildInstanceIDs(product string, config map[string]int
 			return nil, fmt.Errorf("DDoS部署需要填写实例ID和域名")
 		}
 		return []string{instanceID + "|" + domain + "|443"}, nil
+
+	case "lighthouse":
+		regionID := base.GetConfigString(config, "regionid")
+		lid := base.GetConfigString(config, "lighthouse_id")
+		domain := base.GetConfigString(config, "domain")
+		if regionID == "" || lid == "" || domain == "" {
+			return nil, fmt.Errorf("轻量服务器部署需要填写地域ID、实例ID、绑定域名")
+		}
+		return []string{regionID + "|" + lid + "|" + domain}, nil
 
 	default:
 		// cdn, waf, live, vod, scf 等：使用域名作为 instanceId
@@ -341,8 +352,12 @@ func (p *TencentProvider) deployTEO(fullchain, privateKey string, config map[str
 
 	p.Log(fmt.Sprintf("正在部署证书到腾讯云EdgeOne: %s (ZoneId=%s)", domain, siteID))
 
-	// 构建 TEO API ModifyHostsCertificate 请求
-	// 参考 dnsmgr: 使用 teo.tencentcloudapi.com 的 ModifyHostsCertificate
+	// 构建 TEO API ModifyHostsCertificate 请求（与 dnsmgr tencent.php 一致：国际站走独立 endpoint）
+	teoHost := "teo.tencentcloudapi.com"
+	if base.GetConfigString(config, "site_type") == "intl" {
+		teoHost = "teo.intl.tencentcloudapi.com"
+	}
+
 	hostsJSON := make([]string, len(hosts))
 	for i, h := range hosts {
 		hostsJSON[i] = fmt.Sprintf(`"%s"`, h)
@@ -358,7 +373,7 @@ func (p *TencentProvider) deployTEO(fullchain, privateKey string, config map[str
 	secretID := p.GetString("SecretId")
 	secretKey := p.GetString("SecretKey")
 
-	err = p.callTencentAPI("teo.tencentcloudapi.com", "teo", "2022-09-01",
+	err = p.callTencentAPI(teoHost, "teo", "2022-09-01",
 		"ModifyHostsCertificate", reqBody, secretID, secretKey)
 	if err != nil {
 		return fmt.Errorf("EdgeOne部署失败: %v", err)

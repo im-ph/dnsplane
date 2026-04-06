@@ -22,6 +22,7 @@ import (
 
 func init() {
 	base.Register("aws_cloudfront", NewAWSCloudFrontProvider)
+	base.Register("aws_acm", NewAWSCloudFrontProvider)
 }
 
 /* AWS CloudFront XML 解析用预编译正则（避免循环内反复编译） */

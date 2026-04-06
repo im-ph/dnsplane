@@ -64,6 +64,11 @@ type GetRequestLogsRequest struct {
 	EndDate   string `json:"end_date"`
 }
 
+func buildRequestLogsListQuery(req *GetRequestLogsRequest) *gorm.DB {
+	q := database.RequestDB.Model(&models.RequestLog{})
+	return applyRequestLogFilters(q, req)
+}
+
 func applyRequestLogFilters(query *gorm.DB, req *GetRequestLogsRequest) *gorm.DB {
 	if req.Keyword != "" {
 		query = query.Where("request_id LIKE ? OR error_id LIKE ? OR path LIKE ? OR username LIKE ? OR ip LIKE ?",
@@ -115,15 +120,20 @@ func GetRequestLogs(c *gin.Context) {
 		req.PageSize = 200
 	}
 
-	query := database.RequestDB.Model(&models.RequestLog{})
-	query = applyRequestLogFilters(query, &req)
-
 	var total int64
-	query.Count(&total)
-
 	var logs []models.RequestLog
-	query.Order("id DESC").Offset((req.Page - 1) * req.PageSize).Limit(req.PageSize).
-		Select(requestLogListSelect).Find(&logs)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		buildRequestLogsListQuery(&req).Count(&total)
+	}()
+	go func() {
+		defer wg.Done()
+		buildRequestLogsListQuery(&req).Order("id DESC").Offset((req.Page - 1) * req.PageSize).Limit(req.PageSize).
+			Select(requestLogListSelect).Find(&logs)
+	}()
+	wg.Wait()
 
 	middleware.SuccessResponse(c, gin.H{"total": total, "list": logs})
 }
@@ -226,18 +236,27 @@ func GetRequestStats(c *gin.Context) {
 		TodayError int64 `gorm:"column:today_error"`
 	}
 	var rs reqStats
-	database.RequestDB.Model(&models.RequestLog{}).Select(
-		"COUNT(*) as total, "+
-			"SUM(CASE WHEN is_error=1 THEN 1 ELSE 0 END) as error_cnt, "+
-			"SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as today_cnt, "+
-			"SUM(CASE WHEN created_at >= ? AND is_error=1 THEN 1 ELSE 0 END) as today_error",
-		today, today,
-	).Scan(&rs)
-	totalCount, errorCount, todayCount, todayErrorCount := rs.Total, rs.ErrorCnt, rs.TodayCnt, rs.TodayError
-
 	var recentErrors []models.RequestLog
-	database.RequestDB.Where("is_error = ?", true).Order("id DESC").Limit(5).
-		Select(requestLogRecentErrSelect).Find(&recentErrors)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		database.RequestDB.Model(&models.RequestLog{}).Select(
+			"COUNT(*) as total, "+
+				"SUM(CASE WHEN is_error=1 THEN 1 ELSE 0 END) as error_cnt, "+
+				"SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as today_cnt, "+
+				"SUM(CASE WHEN created_at >= ? AND is_error=1 THEN 1 ELSE 0 END) as today_error",
+			today, today,
+		).Scan(&rs)
+	}()
+	go func() {
+		defer wg.Done()
+		database.RequestDB.Where("is_error = ?", true).Order("id DESC").Limit(5).
+			Select(requestLogRecentErrSelect).Find(&recentErrors)
+	}()
+	wg.Wait()
+
+	totalCount, errorCount, todayCount, todayErrorCount := rs.Total, rs.ErrorCnt, rs.TodayCnt, rs.TodayError
 
 	h := gin.H{
 		"total_count":       totalCount,

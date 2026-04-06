@@ -9,6 +9,7 @@ import (
 	"main/internal/cert"
 	"main/internal/cert/deploy"
 	"main/internal/database"
+	"main/internal/dbcache"
 	"main/internal/dns"
 	"main/internal/logger"
 	"main/internal/models"
@@ -18,27 +19,86 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+// certDomainsByOrderIDs 按订单 ID 批量加载证书域名，避免列表接口 N+1。
+func certDomainsByOrderIDs(tx *gorm.DB, orderIDs []uint) map[uint][]string {
+	out := make(map[uint][]string)
+	if len(orderIDs) == 0 {
+		return out
+	}
+	seen := make(map[uint]struct{}, len(orderIDs))
+	uniq := make([]uint, 0, len(orderIDs))
+	for _, id := range orderIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return out
+	}
+	var rows []models.CertDomain
+	tx.Where("oid IN ?", uniq).Order("oid ASC, sort ASC").Find(&rows)
+	for _, r := range rows {
+		out[r.OrderID] = append(out[r.OrderID], r.Domain)
+	}
+	return out
+}
+
+type certAccountListRow struct {
+	ID        uint      `json:"id"`
+	Type      string    `json:"type"`
+	TypeName  string    `json:"type_name"`
+	Name      string    `json:"name"`
+	Config    string    `json:"config"`
+	Remark    string    `json:"remark"`
+	IsDeploy  bool      `json:"is_deploy"`
+	CreatedAt time.Time `json:"created_at"`
+}
 
 func GetCertAccounts(c *gin.Context) {
 	isDeploy := c.Query("deploy") == "1"
-	var accounts []models.CertAccount
+	cacheKey := dbcache.KeyCertAccountsList(isDeploy, true, 0)
 
-	query := database.DB
-	if isDeploy {
-		query = query.Where("is_deploy = ?", true)
-	} else {
-		query = query.Where("is_deploy = ?", false)
+	var rows []certAccountListRow
+	if err := dbcache.GetOrSetJSON(c.Request.Context(), cacheKey, dbcache.DefaultTTL, func() (interface{}, error) {
+		var accounts []models.CertAccount
+		q := database.DB
+		if isDeploy {
+			q = q.Where("is_deploy = ?", true)
+		} else {
+			q = q.Where("is_deploy = ?", false)
+		}
+		if err := q.Find(&accounts).Error; err != nil {
+			return nil, err
+		}
+		list := make([]certAccountListRow, 0, len(accounts))
+		for _, acc := range accounts {
+			cfg, _ := cert.GetProviderConfig(acc.Type)
+			list = append(list, certAccountListRow{
+				ID: acc.ID, Type: acc.Type, TypeName: cfg.Name,
+				Name: acc.Name, Config: acc.Config, Remark: acc.Remark,
+				IsDeploy: acc.IsDeploy, CreatedAt: acc.CreatedAt,
+			})
+		}
+		return list, nil
+	}, &rows); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "加载失败"})
+		return
 	}
-	query.Find(&accounts)
 
-	result := make([]gin.H, 0, len(accounts))
-	for _, acc := range accounts {
-		cfg, _ := cert.GetProviderConfig(acc.Type)
+	result := make([]gin.H, 0, len(rows))
+	for _, acc := range rows {
 		result = append(result, gin.H{
 			"id":         acc.ID,
 			"type":       acc.Type,
-			"type_name":  cfg.Name,
+			"type_name":  acc.TypeName,
 			"name":       acc.Name,
 			"config":     acc.Config,
 			"remark":     acc.Remark,
@@ -78,6 +138,7 @@ func CreateCertAccount(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "创建失败"})
 		return
 	}
+	dbcache.BustCertAccountsList()
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "创建成功", "data": gin.H{"id": account.ID}})
 }
@@ -105,12 +166,14 @@ func UpdateCertAccount(c *gin.Context) {
 	}
 
 	database.DB.Model(&account).Updates(updates)
+	dbcache.BustCertAccountsList()
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "更新成功"})
 }
 
 func DeleteCertAccount(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	database.DB.Delete(&models.CertAccount{}, id)
+	dbcache.BustCertAccountsList()
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "删除成功"})
 }
 
@@ -130,15 +193,20 @@ func GetCertOrders(c *gin.Context) {
 		OrderResult
 		Domains []string `json:"domains"`
 	}
+	orderIDs := make([]uint, len(dbOrders))
+	for i := range dbOrders {
+		orderIDs[i] = dbOrders[i].ID
+	}
+	domainsByOID := certDomainsByOrderIDs(database.DB, orderIDs)
+
 	orders := make([]OrderResponse, len(dbOrders))
 	for i := range dbOrders {
 		orders[i].OrderResult = dbOrders[i]
-		orders[i].Domains = []string{}
-		var domains []models.CertDomain
-		database.DB.Where("oid = ?", dbOrders[i].ID).Order("sort ASC").Find(&domains)
-		for _, d := range domains {
-			orders[i].Domains = append(orders[i].Domains, d.Domain)
+		dlist := domainsByOID[dbOrders[i].ID]
+		if dlist == nil {
+			dlist = []string{}
 		}
+		orders[i].Domains = dlist
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": orders})
@@ -770,15 +838,20 @@ func GetCertDeploys(c *gin.Context) {
 		DeployResult
 		OrderDomains []string `json:"order_domains"`
 	}
+	oidList := make([]uint, len(dbDeploys))
+	for i := range dbDeploys {
+		oidList[i] = dbDeploys[i].OrderID
+	}
+	domainsByOID := certDomainsByOrderIDs(database.DB, oidList)
+
 	result := make([]DeployResponse, len(dbDeploys))
 	for i := range dbDeploys {
 		result[i].DeployResult = dbDeploys[i]
-		result[i].OrderDomains = []string{}
-		var domains []models.CertDomain
-		database.DB.Where("oid = ?", dbDeploys[i].OrderID).Order("sort ASC").Find(&domains)
-		for _, d := range domains {
-			result[i].OrderDomains = append(result[i].OrderDomains, d.Domain)
+		dlist := domainsByOID[dbDeploys[i].OrderID]
+		if dlist == nil {
+			dlist = []string{}
 		}
+		result[i].OrderDomains = dlist
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": result})
@@ -881,14 +954,7 @@ func ProcessCertDeploy(c *gin.Context) {
 		json.Unmarshal([]byte(account.Config), &accConfig)
 	}
 
-	// 获取部署提供商
-	provider, err := deploy.GetProvider(account.Type, accConfig)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "获取部署提供商失败: " + err.Error()})
-		return
-	}
-
-	// 解析部署配置
+	// 解析部署配置（须先于 GetProvider，以便解析 aliyun/tencent 等 product 子类型）
 	var deployConfig map[string]interface{}
 	if deployTask.Config != "" {
 		json.Unmarshal([]byte(deployTask.Config), &deployConfig)
@@ -909,6 +975,12 @@ func ProcessCertDeploy(c *gin.Context) {
 		deployConfig["domains"] = strings.Join(domainList, ",")
 	}
 
+	provider, err := deploy.GetProvider(account.Type, accConfig, deployConfig)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "获取部署提供商失败: " + err.Error()})
+		return
+	}
+
 	// 执行部署
 	if err := provider.Deploy(context.Background(), order.FullChain, order.PrivateKey, deployConfig); err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "部署失败: " + err.Error()})
@@ -923,7 +995,7 @@ func ProcessCertDeploy(c *gin.Context) {
 
 func GetCertProviders(c *gin.Context) {
 	certProviders := cert.GetCertProviderConfigs()
-	deployProviders := cert.GetDeployProviderConfigs()
+	deployProviders := deploy.MergeDeployProviderConfigsForAPI(cert.GetDeployProviderConfigs())
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{

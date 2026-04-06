@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -55,6 +56,42 @@ func GenerateErrorID() string {
 
 const maxRequestLogBodyLen = 8192
 
+// maxSuccessResponseCapture 成功响应落库正文上限（仅截取前若干字节，便于管理端对照）
+const maxSuccessResponseCapture = 16384
+
+// respCaptureWriter 在不影响真实输出的前提下截取响应体片段供请求日志使用
+type respCaptureWriter struct {
+	gin.ResponseWriter
+	buf *bytes.Buffer
+	lim int
+}
+
+func (w *respCaptureWriter) Write(b []byte) (int, error) {
+	if w.buf != nil && w.buf.Len() < w.lim {
+		rest := w.lim - w.buf.Len()
+		if rest > len(b) {
+			rest = len(b)
+		}
+		if rest > 0 {
+			_, _ = w.buf.Write(b[:rest])
+		}
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *respCaptureWriter) WriteString(s string) (int, error) {
+	if w.buf != nil && w.buf.Len() < w.lim {
+		rest := w.lim - w.buf.Len()
+		if rest > len(s) {
+			rest = len(s)
+		}
+		if rest > 0 {
+			_, _ = w.buf.WriteString(s[:rest])
+		}
+	}
+	return w.ResponseWriter.WriteString(s)
+}
+
 // RequestTrace 请求追踪中间件
 func RequestTrace() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -68,6 +105,8 @@ func RequestTrace() gin.HandlerFunc {
 		requestID := GenerateRequestID()
 		c.Set(RequestIDKey, requestID)
 		c.Set(DBQueriesKey, &[]database.DBQuery{})
+		unbindGinTrace := database.BindRequestGinForDBTrace(c)
+		defer unbindGinTrace()
 		c.Header("X-Request-ID", requestID)
 		var bodyBytes []byte
 		if c.Request.Body != nil {
@@ -75,17 +114,27 @@ func RequestTrace() gin.HandlerFunc {
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
 
-		// 收集请求头
+		// 收集请求头（含 Host；多值头合并，避免 HTTP/2 等场景下漏记）
 		headers := make(map[string]string)
-		for k, v := range c.Request.Header {
-			if len(v) > 0 {
-				headers[k] = v[0]
+		for k, vals := range c.Request.Header {
+			if len(vals) == 0 {
+				continue
 			}
+			if len(vals) == 1 {
+				headers[k] = vals[0]
+			} else {
+				headers[k] = strings.Join(vals, ", ")
+			}
+		}
+		if h := c.Request.Host; h != "" {
+			headers["Host"] = h
 		}
 		headersJSON, _ := json.Marshal(headers)
 
-		// 处理请求（不再包装 Writer 复制整段响应体，大幅降低 CPU 与延迟）
+		captureBuf := &bytes.Buffer{}
+		c.Writer = &respCaptureWriter{ResponseWriter: c.Writer, buf: captureBuf, lim: maxSuccessResponseCapture}
 		c.Next()
+		capturedResp := captureBuf.String()
 
 		// 计算耗时
 		duration := time.Since(start).Milliseconds()
@@ -115,24 +164,38 @@ func RequestTrace() gin.HandlerFunc {
 			errorStack = c.GetString(ErrorStackKey)
 		}
 
-		// 处理请求体 - 优先使用解密后的数据
+		// 处理请求体：解密明文优先；表单 URL 编码解析为 JSON 便于阅读；否则原始字节
 		bodyStr := string(bodyBytes)
 		if decryptedData := GetDecryptedData(c); decryptedData != nil {
 			if jsonBytes, err := json.Marshal(decryptedData); err == nil {
 				bodyStr = string(jsonBytes)
+			}
+		} else if len(bodyBytes) > 0 {
+			ct := strings.ToLower(c.Request.Header.Get("Content-Type"))
+			if strings.Contains(ct, "application/x-www-form-urlencoded") {
+				if vals, err := url.ParseQuery(string(bodyBytes)); err == nil && len(vals) > 0 {
+					if jsonBytes, err := json.Marshal(vals); err == nil {
+						bodyStr = string(jsonBytes)
+					}
+				}
 			}
 		}
 		if len(bodyStr) > maxRequestLogBodyLen {
 			bodyStr = truncateString(bodyStr, maxRequestLogBodyLen)
 		}
 
-		// 成功响应不落库 response 正文（此前会缓冲整段响应，开销大）；错误时可带 handler 提供的原始结构
+		// 响应：EncryptedResponse/SuccessResponse 已写入 original_response，成功与失败都应优先落库（避免仅依赖 Writer 截取）
 		responseStr := ""
-		if isError {
-			if originalResp := GetOriginalResponse(c); originalResp != nil {
-				if jsonBytes, err := json.Marshal(originalResp); err == nil {
-					responseStr = truncateString(string(jsonBytes), MaxResponseSize)
-				}
+		if originalResp := GetOriginalResponse(c); originalResp != nil {
+			if jsonBytes, err := json.Marshal(originalResp); err == nil {
+				responseStr = truncateString(string(jsonBytes), MaxResponseSize)
+			}
+		}
+		if responseStr == "" {
+			if isError && capturedResp != "" {
+				responseStr = truncateString(capturedResp, MaxResponseSize)
+			} else if !isError && capturedResp != "" {
+				responseStr = truncateString(capturedResp, maxSuccessResponseCapture)
 			}
 		}
 

@@ -15,12 +15,22 @@ import (
 
 func init() {
 	base.Register("opanel", NewOPanelProvider)
+	base.Register("1panel", NewOPanelProvider)
 }
 
 // OPanelProvider 1Panel证书部署
 type OPanelProvider struct {
 	base.BaseProvider
 	client *http.Client
+}
+
+// panelAPIKey 兼容账户字段 key（与 dnsmgr / deploy 配置一致）及历史 api_key
+func (p *OPanelProvider) panelAPIKey() string {
+	k := p.GetString("key")
+	if k != "" {
+		return k
+	}
+	return p.GetString("api_key")
 }
 
 // NewOPanelProvider creates a new OPanelProvider
@@ -88,7 +98,7 @@ func (p *OPanelProvider) httpRequest(ctx context.Context, method, reqURL string,
 // Authentication: 1Panel-Token = md5('1panel' + key + timestamp)
 func (p *OPanelProvider) request(ctx context.Context, path string, params map[string]interface{}) (map[string]interface{}, error) {
 	panelURL := strings.TrimSuffix(p.GetString("url"), "/")
-	apiKey := p.GetString("key")
+	apiKey := p.panelAPIKey()
 	version := p.GetString("version")
 	if version == "" {
 		version = "v2"
@@ -135,7 +145,7 @@ func (p *OPanelProvider) request(ctx context.Context, path string, params map[st
 // Check verifies connection to 1Panel
 func (p *OPanelProvider) Check(ctx context.Context) error {
 	panelURL := p.GetString("url")
-	apiKey := p.GetString("key")
+	apiKey := p.panelAPIKey()
 
 	if panelURL == "" {
 		return fmt.Errorf("面板地址不能为空")

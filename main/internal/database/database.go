@@ -351,7 +351,7 @@ const dbStartTimeKey = "db_start_time"
 
 // WithContext 为DB添加请求上下文
 func WithContext(c *gin.Context) *gorm.DB {
-	return DB.WithContext(context.WithValue(c.Request.Context(), "gin_context", c))
+	return DB.WithContext(context.WithValue(c.Request.Context(), GinContextKey, c))
 }
 
 // WithLogContext 返回日志数据库连接（Log queries不需要请求追踪）
@@ -364,53 +364,76 @@ func WithRequestContext(c *gin.Context) *gorm.DB {
 	return RequestDB
 }
 
-// RegisterDBCallbacks 注册GORM查询回调
+// RegisterDBCallbacks 注册 GORM 查询回调（主库 + 日志库；不含 RequestDB，避免写请求日志本身再被追踪）
 func RegisterDBCallbacks() {
-	// Query回调 (SELECT)
-	DB.Callback().Query().Before("gorm:query").Register("record_start_time", func(db *gorm.DB) {
-		db.Set(dbStartTimeKey, time.Now())
-	})
-	DB.Callback().Query().After("gorm:query").Register("record_query", recordQueryCallback)
+	registerTraceCallbacks(DB)
+	registerTraceCallbacks(LogDB)
+}
 
-	// Create回调 (INSERT)
-	DB.Callback().Create().Before("gorm:create").Register("record_start_time_create", func(db *gorm.DB) {
-		db.Set(dbStartTimeKey, time.Now())
-	})
-	DB.Callback().Create().After("gorm:create").Register("record_create", recordQueryCallback)
+func registerTraceCallbacks(gdb *gorm.DB) {
+	if gdb == nil {
+		return
+	}
+	inject := func(db *gorm.DB) { injectGinIntoDBStatement(db) }
 
-	// Update回调 (UPDATE)
-	DB.Callback().Update().Before("gorm:update").Register("record_start_time_update", func(db *gorm.DB) {
+	// Query (SELECT)
+	gdb.Callback().Query().Before("gorm:query").Register("trace_inject_gin", inject)
+	gdb.Callback().Query().Before("gorm:query").Register("record_start_time", func(db *gorm.DB) {
 		db.Set(dbStartTimeKey, time.Now())
 	})
-	DB.Callback().Update().After("gorm:update").Register("record_update", recordQueryCallback)
+	gdb.Callback().Query().After("gorm:query").Register("record_query", recordQueryCallback)
 
-	// Delete回调 (DELETE)
-	DB.Callback().Delete().Before("gorm:delete").Register("record_start_time_delete", func(db *gorm.DB) {
+	// Create (INSERT)
+	gdb.Callback().Create().Before("gorm:create").Register("trace_inject_gin_create", inject)
+	gdb.Callback().Create().Before("gorm:create").Register("record_start_time_create", func(db *gorm.DB) {
 		db.Set(dbStartTimeKey, time.Now())
 	})
-	DB.Callback().Delete().After("gorm:delete").Register("record_delete", recordQueryCallback)
+	gdb.Callback().Create().After("gorm:create").Register("record_create", recordQueryCallback)
 
-	// Row回调 (用于Scan等操作)
-	DB.Callback().Row().Before("gorm:row").Register("record_start_time_row", func(db *gorm.DB) {
+	// Update (UPDATE)
+	gdb.Callback().Update().Before("gorm:update").Register("trace_inject_gin_update", inject)
+	gdb.Callback().Update().Before("gorm:update").Register("record_start_time_update", func(db *gorm.DB) {
 		db.Set(dbStartTimeKey, time.Now())
 	})
-	DB.Callback().Row().After("gorm:row").Register("record_row", recordQueryCallback)
+	gdb.Callback().Update().After("gorm:update").Register("record_update", recordQueryCallback)
 
-	// Raw回调 (用于Exec等原生SQL)
-	DB.Callback().Raw().Before("gorm:raw").Register("record_start_time_raw", func(db *gorm.DB) {
+	// Delete (DELETE)
+	gdb.Callback().Delete().Before("gorm:delete").Register("trace_inject_gin_delete", inject)
+	gdb.Callback().Delete().Before("gorm:delete").Register("record_start_time_delete", func(db *gorm.DB) {
 		db.Set(dbStartTimeKey, time.Now())
 	})
-	DB.Callback().Raw().After("gorm:raw").Register("record_raw", recordQueryCallback)
+	gdb.Callback().Delete().After("gorm:delete").Register("record_delete", recordQueryCallback)
+
+	// Row (Scan 等)
+	gdb.Callback().Row().Before("gorm:row").Register("trace_inject_gin_row", inject)
+	gdb.Callback().Row().Before("gorm:row").Register("record_start_time_row", func(db *gorm.DB) {
+		db.Set(dbStartTimeKey, time.Now())
+	})
+	gdb.Callback().Row().After("gorm:row").Register("record_row", recordQueryCallback)
+
+	// Raw / Exec
+	gdb.Callback().Raw().Before("gorm:raw").Register("trace_inject_gin_raw", inject)
+	gdb.Callback().Raw().Before("gorm:raw").Register("record_start_time_raw", func(db *gorm.DB) {
+		db.Set(dbStartTimeKey, time.Now())
+	})
+	gdb.Callback().Raw().After("gorm:raw").Register("record_raw", recordQueryCallback)
 }
 
 func recordQueryCallback(db *gorm.DB) {
-	if db.Statement == nil || db.Statement.Context == nil {
+	if db.Statement == nil {
+		return
+	}
+	if db.Statement.Context == nil {
 		return
 	}
 
-	// 获取gin上下文
-	ginCtx, ok := db.Statement.Context.Value("gin_context").(*gin.Context)
+	ginCtx, ok := db.Statement.Context.Value(GinContextKey).(*gin.Context)
 	if !ok || ginCtx == nil {
+		return
+	}
+
+	// 仅在有请求追踪（middleware.RequestTrace 注入 db_queries）时记录；否则跳过 Explain 等高开销路径
+	if _, exists := ginCtx.Get(dbQueriesKey); !exists {
 		return
 	}
 

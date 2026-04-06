@@ -42,12 +42,18 @@ export default function DashboardPage() {
   const fetchAll = useCallback(async (isManual = false) => {
     if (isManual) setRefreshing(true)
     try {
-      const [statsRes, sysRes] = await Promise.all([
+      const [statsResult, sysResult] = await Promise.allSettled([
         dashboardApi.getStats(),
         systemApi.getSystemInfo(),
       ])
-      if (statsRes.code === 0 && statsRes.data) setStats(statsRes.data)
-      if (sysRes.code === 0 && sysRes.data) setSysInfo(sysRes.data)
+      if (statsResult.status === 'fulfilled') {
+        const statsRes = statsResult.value
+        if (statsRes.code === 0 && statsRes.data) setStats(statsRes.data)
+      }
+      if (sysResult.status === 'fulfilled') {
+        const sysRes = sysResult.value
+        if (sysRes.code === 0 && sysRes.data) setSysInfo(sysRes.data)
+      }
       setLastUpdate(new Date())
     } catch {
       /* ignore */

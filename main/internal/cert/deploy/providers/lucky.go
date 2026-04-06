@@ -34,10 +34,14 @@ func NewLuckyProvider(config map[string]interface{}) base.DeployProvider {
 	if pathPrefix != "" {
 		baseURL += pathPrefix
 	}
+	openTok := base.GetConfigString(config, "opentoken")
+	if openTok == "" {
+		openTok = base.GetConfigString(config, "token")
+	}
 	return &LuckyProvider{
 		BaseProvider: base.BaseProvider{Config: config},
 		panelURL:     baseURL,
-		openToken:    base.GetConfigString(config, "opentoken"),
+		openToken:    openTok,
 		client:       &http.Client{Timeout: 30 * time.Second},
 	}
 }

@@ -3,7 +3,9 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"main/internal/api/middleware"
 	"main/internal/database"
+	"main/internal/dbcache"
 	"main/internal/models"
 	"net/http"
 	"strconv"
@@ -13,6 +15,21 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// userPublicRow 用户列表对外字段（不读 password 等大字段）
+type userPublicRow struct {
+	ID          uint       `json:"id"`
+	Username    string     `json:"username"`
+	Email       string     `json:"email"`
+	Level       int        `json:"level"`
+	IsAPI       bool       `json:"is_api"`
+	APIKey      string     `json:"api_key,omitempty"`
+	Status      int        `json:"status"`
+	Permissions string     `json:"permissions"`
+	TOTPOpen    bool       `json:"totp_open"`
+	RegTime     time.Time  `json:"reg_time"`
+	LastTime    *time.Time `json:"last_time"`
+}
+
 // generateAPIKey 生成随机API Key
 func generateAPIKey() string {
 	bytes := make([]byte, 16)
@@ -21,27 +38,32 @@ func generateAPIKey() string {
 }
 
 func GetUsers(c *gin.Context) {
-	var users []models.User
-	database.DB.Find(&users)
-
-	result := make([]gin.H, 0, len(users))
-	for _, u := range users {
-		result = append(result, gin.H{
-			"id":          u.ID,
-			"username":    u.Username,
-			"email":       u.Email,
-			"level":       u.Level,
-			"is_api":      u.IsAPI,
-			"api_key":     u.APIKey,
-			"status":      u.Status,
-			"permissions": u.Permissions,
-			"totp_open":   u.TOTPOpen,
-			"reg_time":    u.RegTime,
-			"last_time":   u.LastTime,
-		})
+	type usersCachePayload struct {
+		Total int             `json:"total"`
+		List  []userPublicRow `json:"list"`
+	}
+	var payload usersCachePayload
+	if err := dbcache.GetOrSetJSON(c.Request.Context(), dbcache.KeyUsersAdminFullList(), dbcache.DefaultTTL, func() (interface{}, error) {
+		var users []models.User
+		if err := database.DB.Select(
+			"id", "username", "email", "level", "is_api", "api_key", "status", "permissions", "totp_open", "reg_time", "last_time",
+		).Find(&users).Error; err != nil {
+			return nil, err
+		}
+		list := make([]userPublicRow, 0, len(users))
+		for _, u := range users {
+			list = append(list, userPublicRow{
+				ID: u.ID, Username: u.Username, Email: u.Email, Level: u.Level, IsAPI: u.IsAPI, APIKey: u.APIKey,
+				Status: u.Status, Permissions: u.Permissions, TOTPOpen: u.TOTPOpen, RegTime: u.RegTime, LastTime: u.LastTime,
+			})
+		}
+		return usersCachePayload{Total: len(list), List: list}, nil
+	}, &payload); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "加载失败"})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"total": len(users), "list": result}})
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"total": payload.Total, "list": payload.List}})
 }
 
 type CreateUserRequest struct {
@@ -93,6 +115,7 @@ func CreateUser(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "创建失败"})
 		return
 	}
+	dbcache.BustUserList()
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "创建成功", "data": gin.H{"id": user.ID, "api_key": user.APIKey}})
 }
@@ -145,6 +168,7 @@ func UpdateUser(c *gin.Context) {
 
 	// 获取更新后的用户信息
 	database.DB.First(&user, id)
+	dbcache.BustUserList()
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "更新成功", "data": gin.H{"api_key": user.APIKey}})
 }
@@ -152,7 +176,7 @@ func UpdateUser(c *gin.Context) {
 func DeleteUser(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
-	currentUserID := c.GetUint("user_id")
+	currentUserID := middleware.AuthUserID(c)
 	if uint(id) == currentUserID {
 		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "msg": "不能删除自己"})
 		return
@@ -161,6 +185,7 @@ func DeleteUser(c *gin.Context) {
 	// 同时删除用户的权限
 	database.DB.Where("uid = ?", id).Delete(&models.Permission{})
 	database.DB.Delete(&models.User{}, id)
+	dbcache.BustUserList()
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "删除成功"})
 }
 
@@ -270,6 +295,7 @@ func ResetAPIKey(c *gin.Context) {
 
 	newKey := generateAPIKey()
 	database.DB.Model(&user).Update("api_key", newKey)
+	dbcache.BustUserList()
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "重新生成成功", "data": gin.H{"api_key": newKey}})
 }

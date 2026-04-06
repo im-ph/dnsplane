@@ -18,6 +18,7 @@ import (
 
 func init() {
 	base.Register("xp", NewXPProvider)
+	base.Register("xpanel", NewXPProvider)
 }
 
 // XPProvider 小皮面板部署器
@@ -35,6 +36,9 @@ func NewXPProvider(config map[string]interface{}) base.DeployProvider {
 func (p *XPProvider) Check(ctx context.Context) error {
 	panelURL := strings.TrimRight(p.GetString("url"), "/")
 	apiKey := p.GetString("apikey")
+	if apiKey == "" {
+		apiKey = p.GetString("api_key")
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
@@ -64,6 +68,9 @@ func (p *XPProvider) Check(ctx context.Context) error {
 func (p *XPProvider) Deploy(ctx context.Context, fullchain, privateKey string, config map[string]interface{}) error {
 	panelURL := strings.TrimRight(p.GetString("url"), "/")
 	apiKey := p.GetString("apikey")
+	if apiKey == "" {
+		apiKey = p.GetString("api_key")
+	}
 	sites := strings.Split(p.GetStringFrom(config, "sites"), "\n")
 
 	p.Log(fmt.Sprintf("开始部署到小皮面板: %s", panelURL))

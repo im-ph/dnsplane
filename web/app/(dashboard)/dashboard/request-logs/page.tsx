@@ -257,13 +257,28 @@ export default function RequestLogsPage() {
               <TabsContent value="request" className="space-y-4 m-0">
                 <div className="space-y-4">
                   <div>
+                    <div className="text-sm text-muted-foreground mb-2">完整路径（含查询串）</div>
+                    <pre className="text-xs bg-muted p-4 rounded overflow-auto max-h-24 whitespace-pre-wrap break-all">
+                      {selectedLog.path}
+                      {selectedLog.query ? `?${selectedLog.query}` : ''}
+                    </pre>
+                  </div>
+                  <div>
+                    <div className="text-sm text-muted-foreground mb-2">查询参数 (RawQuery)</div>
+                    <pre className="text-xs bg-muted p-4 rounded overflow-auto max-h-32 whitespace-pre-wrap break-all">
+                      {selectedLog.query && selectedLog.query.trim() !== ''
+                        ? selectedLog.query
+                        : '（无）'}
+                    </pre>
+                  </div>
+                  <div>
                     <div className="text-sm text-muted-foreground mb-2">请求头</div>
                     <pre className="text-xs bg-muted p-4 rounded overflow-auto max-h-48">
                       {JSON.stringify(headers, null, 2)}
                     </pre>
                   </div>
                   <div>
-                    <div className="text-sm text-muted-foreground mb-2">请求体</div>
+                    <div className="text-sm text-muted-foreground mb-2">请求体（原始 Body；GET 通常为空；部分接口会发字面量 {}）</div>
                     <pre className="text-xs bg-muted p-4 rounded overflow-auto max-h-64">
                       {selectedLog.body === "[FILTERED]" ? (
                         <span className="text-muted-foreground">[敏感内容已过滤]</span>
@@ -500,9 +515,19 @@ export default function RequestLogsPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => {
-                          setSelectedLog(log)
-                          setDetailOpen(true)
+                        onClick={async () => {
+                          /* 列表接口不返回 headers/body/db_queries，必须按 request_id 拉全量 */
+                          try {
+                            const res = await requestLogApi.getByRequestId(log.request_id)
+                            if (res.code === 0 && res.data) {
+                              setSelectedLog(res.data)
+                              setDetailOpen(true)
+                            } else {
+                              toast.error(res.msg || "加载详情失败")
+                            }
+                          } catch {
+                            toast.error("加载详情失败")
+                          }
                         }}
                       >
                         详情

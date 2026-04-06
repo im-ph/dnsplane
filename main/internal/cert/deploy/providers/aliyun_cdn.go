@@ -1,10 +1,10 @@
 package providers
 
 import (
-	"main/internal/cert/deploy/base"
 	"context"
 	"fmt"
 	"main/internal/cert"
+	"main/internal/cert/deploy/base"
 	"strings"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 
 func init() {
 	base.Register("aliyun_cdn", NewAliyunCDNProvider)
+	base.Register("aliyun_dcdn", NewAliyunCDNProvider)
 }
 
 type AliyunCDNProvider struct {

@@ -9,6 +9,9 @@ import (
 
 const usersListPrefix = "db:v1:users:list:"
 
+// usersAdminFullListKey 管理端「用户列表」全量缓存（与分页列表键分离）
+const usersAdminFullListKey = "db:v1:users:admin_full"
+
 const certAccountsListPrefix = "db:v1:cert:accounts:list:"
 
 // KeyAccountsAdmin DNS 账户列表缓存（管理员视角）
@@ -30,6 +33,9 @@ func KeyUsersList(page, pageSize int, keyword string) string {
 // PrefixUsersList 用户列表缓存键前缀（批量失效）
 func PrefixUsersList() string { return usersListPrefix }
 
+// KeyUsersAdminFullList 管理端 GET /users 全量列表缓存键
+func KeyUsersAdminFullList() string { return usersAdminFullListKey }
+
 // BustAccounts 账户增删改后失效管理员列表与指定用户列表
 func BustAccounts(ownerUID string) {
 	_ = Delete(context.Background(), KeyAccountsAdmin(), KeyAccountsUser(ownerUID))
@@ -37,6 +43,7 @@ func BustAccounts(ownerUID string) {
 
 // BustUserList 用户或域名权限等变更后失效所有用户列表分页缓存
 func BustUserList() {
+	_ = Delete(context.Background(), usersAdminFullListKey)
 	_ = DeletePrefix(context.Background(), PrefixUsersList())
 }
 

@@ -13,6 +13,7 @@ import (
 	"main/internal/utils"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -123,11 +124,21 @@ func Login(c *gin.Context) {
 		}
 	}
 
-	token, err := middleware.GenerateToken(strconv.FormatUint(uint64(user.ID), 10), user.Username, user.Level)
+	tokenPair, err := middleware.GenerateTokenPair(strconv.FormatUint(uint64(user.ID), 10), user.Username, user.Level)
 	if err != nil {
 		logger.Error("生成用户Token失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "生成Token失败"})
 		return
+	}
+
+	if err := middleware.SetAuthCookies(c, tokenPair); err != nil {
+		logger.Error("设置登录Cookie失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "登录失败"})
+		return
+	}
+
+	if rtClaims, _ := middleware.ParseToken(tokenPair.RefreshToken); rtClaims != nil {
+		middleware.StoreRefreshJTI(strconv.FormatUint(uint64(user.ID), 10), rtClaims.ID)
 	}
 
 	now := time.Now()
@@ -138,7 +149,9 @@ func Login(c *gin.Context) {
 		"code": 0,
 		"msg":  "登录成功",
 		"data": gin.H{
-			"token": token,
+			"token":         tokenPair.AccessToken,
+			"refresh_token": tokenPair.RefreshToken,
+			"expires_in":    tokenPair.ExpiresIn,
 			"user": gin.H{
 				"id":       user.ID,
 				"username": user.Username,
@@ -151,29 +164,72 @@ func Login(c *gin.Context) {
 func Logout(c *gin.Context) {
 	username := c.GetString("username")
 	logger.Info("用户退出登录: %s", username)
-	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "退出成功"})
+	middleware.ClearAuthCookies(c)
+	middleware.SuccessMsg(c, "退出成功")
 }
 
-func GetUserInfo(c *gin.Context) {
-	userID := c.GetUint("user_id")
+/*
+ * RefreshToken 用 refresh token 换取新的 access/refresh 对（无需 Auth 中间件）
+ * 凭证来源：JSON body.refresh_token，或 HttpOnly Cookie _rt（路径 /api/auth/refresh）
+ */
+func RefreshToken(c *gin.Context) {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&body)
 
-	var user models.User
-	if err := database.DB.First(&user, userID).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "用户不存在"})
+	rt := strings.TrimSpace(body.RefreshToken)
+	if rt == "" {
+		if ck, err := c.Cookie("_rt"); err == nil && ck != "" {
+			if dec, ok := middleware.DecryptCookie(ck); ok {
+				rt = dec
+			}
+		}
+	}
+	if rt == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "缺少 refresh token"})
+		return
+	}
+
+	pair, err := middleware.RefreshAccessToken(rt)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "刷新失败或已失效"})
+		return
+	}
+	if err := middleware.SetAuthCookies(c, pair); err != nil {
+		logger.Error("刷新后设置 Cookie 失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "刷新失败"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
+		"msg":  "ok",
 		"data": gin.H{
-			"id":        user.ID,
-			"username":  user.Username,
-			"level":     user.Level,
-			"is_api":    user.IsAPI,
-			"totp_open": user.TOTPOpen,
-			"reg_time":  user.RegTime,
-			"last_time": user.LastTime,
+			"token":         pair.AccessToken,
+			"refresh_token": pair.RefreshToken,
+			"expires_in":    pair.ExpiresIn,
 		},
+	})
+}
+
+func GetUserInfo(c *gin.Context) {
+	userID := middleware.AuthUserID(c)
+
+	var user models.User
+	if err := database.DB.First(&user, userID).Error; err != nil {
+		middleware.ErrorResponse(c, "用户不存在")
+		return
+	}
+
+	middleware.SuccessResponse(c, gin.H{
+		"id":        user.ID,
+		"username":  user.Username,
+		"level":     user.Level,
+		"is_api":    user.IsAPI,
+		"totp_open": user.TOTPOpen,
+		"reg_time":  user.RegTime,
+		"last_time": user.LastTime,
 	})
 }
 
@@ -189,7 +245,7 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	userID := c.GetUint("user_id")
+	userID := middleware.AuthUserID(c)
 	var user models.User
 	if err := database.DB.First(&user, userID).Error; err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "用户不存在"})
@@ -271,7 +327,7 @@ func InstallStatus(c *gin.Context) {
 
 // GetTOTPStatus 获取TOTP状态
 func GetTOTPStatus(c *gin.Context) {
-	userID := c.GetUint("user_id")
+	userID := middleware.AuthUserID(c)
 
 	var user models.User
 	if err := database.DB.First(&user, userID).Error; err != nil {
@@ -289,7 +345,7 @@ func GetTOTPStatus(c *gin.Context) {
 
 // EnableTOTP 启用TOTP
 func EnableTOTP(c *gin.Context) {
-	userID := c.GetUint("user_id")
+	userID := middleware.AuthUserID(c)
 
 	var user models.User
 	if err := database.DB.First(&user, userID).Error; err != nil {
@@ -336,7 +392,7 @@ func EnableTOTP(c *gin.Context) {
 
 // VerifyAndEnableTOTP 验证并启用TOTP
 func VerifyAndEnableTOTP(c *gin.Context) {
-	userID := c.GetUint("user_id")
+	userID := middleware.AuthUserID(c)
 
 	var req struct {
 		Code string `json:"code" binding:"required"`
@@ -372,7 +428,7 @@ func VerifyAndEnableTOTP(c *gin.Context) {
 
 // DisableTOTP 禁用TOTP
 func DisableTOTP(c *gin.Context) {
-	userID := c.GetUint("user_id")
+	userID := middleware.AuthUserID(c)
 
 	var req struct {
 		Password string `json:"password" binding:"required"`

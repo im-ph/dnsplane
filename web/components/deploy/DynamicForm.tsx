@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { ProviderConfigField } from '@/lib/api'
+import { evaluateDeployFieldShow } from '@/lib/deploy-config-form'
 
 interface DynamicFormProps {
   fields: ProviderConfigField[]
@@ -23,34 +24,8 @@ export function DynamicForm({ fields, values, onChange, disabled }: DynamicFormP
     onChange(newValues)
   }
 
-  const evaluateCondition = (show: string | undefined): boolean => {
-    if (!show) return true
-    
-    try {
-      // 支持简单的条件表达式: key==value, key!=value, key==value||key==value2
-      const orParts = show.split('||')
-      return orParts.some(orPart => {
-        const andParts = orPart.split('&&')
-        return andParts.every(condition => {
-          condition = condition.trim()
-          if (condition.includes('!=')) {
-            const [key, val] = condition.split('!=').map(s => s.trim().replace(/['"]/g, ''))
-            return localValues[key] !== val
-          }
-          if (condition.includes('==')) {
-            const [key, val] = condition.split('==').map(s => s.trim().replace(/['"]/g, ''))
-            return localValues[key] === val
-          }
-          return true
-        })
-      })
-    } catch {
-      return true
-    }
-  }
-
   const renderField = (field: ProviderConfigField) => {
-    if (!evaluateCondition(field.show)) return null
+    if (!evaluateDeployFieldShow(field.show, localValues)) return null
 
     const value = localValues[field.key] ?? field.value ?? ''
 

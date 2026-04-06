@@ -27,6 +27,7 @@ export default function AddDeployAccountPage() {
             name: cfg.name,
             icon: cfg.icon,
             note: cfg.note,
+            deploy_note: cfg.deploy_note,
             config: cfg.config || [],
           })
         )

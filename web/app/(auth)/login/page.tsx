@@ -132,9 +132,13 @@ export default function LoginPage() {
       })
 
       if (res.code === 0 && res.data) {
-        api.setToken(res.data.token)
+        api.setTokens({
+          token: res.data.token,
+          refresh_token: res.data.refresh_token,
+        })
         toast.success('登录成功')
-        router.push('/dashboard')
+        // 与 next.config trailingSlash 一致，避免多余重定向导致首屏请求时序异常
+        router.push('/dashboard/')
       } else if (res.code === 1001) {
         // 需要TOTP验证
         setNeedTotp(true)

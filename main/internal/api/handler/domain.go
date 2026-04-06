@@ -14,9 +14,18 @@ import (
 	"main/internal/models"
 	"main/internal/service"
 	"main/internal/utils"
+	"sync"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+// domainWithAccountRow 域名列表 JOIN 账户后的扫描结构
+type domainWithAccountRow struct {
+	models.Domain
+	AccountName string `json:"account_name"`
+	AccountType string `json:"account_type"`
+}
 
 /*
  * getProviderByDomain 根据域名获取 DNS provider
@@ -71,6 +80,30 @@ type GetDomainsRequest struct {
 	PageSize int    `json:"page_size"`
 }
 
+func buildDomainsListQuery(c *gin.Context, req *GetDomainsRequest) *gorm.DB {
+	userID := c.GetString("user_id")
+	userLevel := c.GetInt("level")
+
+	q := database.WithContext(c).Table("domains").
+		Select("domains.*, accounts.name as account_name, accounts.type as account_type").
+		Joins("LEFT JOIN accounts ON domains.aid = accounts.id").
+		Where("domains.deleted_at IS NULL")
+
+	if userLevel < 2 {
+		q = q.Where(
+			"domains.aid IN (SELECT id FROM accounts WHERE uid = ? AND deleted_at IS NULL) OR domains.name IN (SELECT domain FROM permissions WHERE uid = ?)",
+			userID, userID,
+		)
+	}
+	if req.Keyword != "" {
+		q = q.Where("domains.name LIKE ?", "%"+req.Keyword+"%")
+	}
+	if req.AID != "" {
+		q = q.Where("domains.aid = ?", req.AID)
+	}
+	return q
+}
+
 /*
  * GetDomains 获取域名列表
  * @route POST /domains/list
@@ -93,44 +126,23 @@ func GetDomains(c *gin.Context) {
 		req.PageSize = 200
 	}
 
-	type DomainWithAccount struct {
-		models.Domain
-		AccountName string `json:"account_name"`
-		AccountType string `json:"account_type"`
-	}
-
 	userID := c.GetString("user_id")
 	userLevel := c.GetInt("level")
 
-	query := database.WithContext(c).Table("domains").
-		Select("domains.*, accounts.name as account_name, accounts.type as account_type").
-		Joins("LEFT JOIN accounts ON domains.aid = accounts.id").
-		Where("domains.deleted_at IS NULL")
-
-	if userLevel < 2 {
-		// 用户自有账户的域名 + 管理员分配权限的域名
-		query = query.Where(
-			"domains.aid IN (SELECT id FROM accounts WHERE uid = ? AND deleted_at IS NULL) OR domains.name IN (SELECT domain FROM permissions WHERE uid = ?)",
-			userID, userID,
-		)
-	}
-
-	if req.Keyword != "" {
-		query = query.Where("domains.name LIKE ?", "%"+req.Keyword+"%")
-	}
-	if req.AID != "" {
-		query = query.Where("domains.aid = ?", req.AID)
-	}
-
-	// 统计总数
 	var total int64
-	query.Count(&total)
+	var domains []domainWithAccountRow
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		buildDomainsListQuery(c, &req).Count(&total)
+	}()
+	go func() {
+		defer wg.Done()
+		buildDomainsListQuery(c, &req).Order("domains.id DESC").Offset((req.Page - 1) * req.PageSize).Limit(req.PageSize).Find(&domains)
+	}()
+	wg.Wait()
 
-	// 分页查询
-	var domains []DomainWithAccount
-	query.Order("domains.id DESC").Offset((req.Page - 1) * req.PageSize).Limit(req.PageSize).Find(&domains)
-
-	// 查询当前用户的备注和权限
 	domainIDs := make([]uint, 0, len(domains))
 	domainNames := make([]string, 0, len(domains))
 	for _, d := range domains {
@@ -138,22 +150,31 @@ func GetDomains(c *gin.Context) {
 		domainNames = append(domainNames, d.Name)
 	}
 	noteMap := make(map[uint]string)
+	permMap := make(map[string]string)
+	var notes []models.DomainNote
+	var perms []models.Permission
+	var wgNotes sync.WaitGroup
 	if len(domainIDs) > 0 {
-		var notes []models.DomainNote
-		uidN, _ := strconv.ParseUint(userID, 10, 32)
-		database.WithContext(c).Where("uid = ? AND did IN ?", uint(uidN), domainIDs).Find(&notes)
-		for _, n := range notes {
-			noteMap[n.DomainID] = n.Remark
-		}
+		wgNotes.Add(1)
+		go func() {
+			defer wgNotes.Done()
+			uidN, _ := strconv.ParseUint(userID, 10, 32)
+			database.WithContext(c).Where("uid = ? AND did IN ?", uint(uidN), domainIDs).Find(&notes)
+		}()
 	}
-	// 非管理员：查询子域名权限
-	permMap := make(map[string]string) // domain name -> sub_domain
 	if userLevel < 2 && len(domainNames) > 0 {
-		var perms []models.Permission
-		database.WithContext(c).Where("uid = ? AND domain IN ?", userID, domainNames).Find(&perms)
-		for _, p := range perms {
-			permMap[p.Domain] = p.SubDomain
-		}
+		wgNotes.Add(1)
+		go func() {
+			defer wgNotes.Done()
+			database.WithContext(c).Where("uid = ? AND domain IN ?", userID, domainNames).Find(&perms)
+		}()
+	}
+	wgNotes.Wait()
+	for _, n := range notes {
+		noteMap[n.DomainID] = n.Remark
+	}
+	for _, p := range perms {
+		permMap[p.Domain] = p.SubDomain
 	}
 
 	// 转换为前端期望的格式

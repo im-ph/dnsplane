@@ -17,8 +17,11 @@ func SetupRouter(staticFS embed.FS) *gin.Engine {
 	r.RedirectFixedPath = false
 	r.Use(gin.Recovery())
 	r.Use(middleware.Logger())
-	r.Use(middleware.CORS())
+	// CORS 仅作用于 /api：静态与页面路由不再跑 Origin 校验与 Expose-Headers，减少每请求开销
 	api := r.Group("/api")
+	api.Use(middleware.CORS())
+	// 请求追踪与落库（含 X-Request-ID、body/headers、db_queries）；须在 CORS 之后以便 OPTIONS 不记日志
+	api.Use(middleware.RequestTrace())
 	{
 		api.POST("/login", handler.Login)
 		api.GET("/auth/captcha", handler.GetCaptcha)
@@ -34,6 +37,7 @@ func SetupRouter(staticFS embed.FS) *gin.Engine {
 		api.GET("/auth/oauth/providers", handler.GetOAuthProviders)
 		api.GET("/auth/oauth/:provider/login", handler.OAuthLogin)
 		api.GET("/auth/oauth/:provider/callback", handler.OAuthCallback)
+		api.POST("/auth/refresh", handler.RefreshToken)
 
 		auth := api.Group("")
 		auth.Use(middleware.Auth())
@@ -123,6 +127,7 @@ func SetupRouter(staticFS embed.FS) *gin.Engine {
 			auth.GET("/cert/providers", handler.GetCertProviders)
 
 			auth.GET("/dashboard/stats", handler.GetDashboardStats)
+			auth.GET("/dashboard/system/info", handler.GetSystemInfo)
 			auth.POST("/system/mail/test", handler.TestMailNotification)
 			auth.POST("/system/telegram/test", handler.TestTelegramNotification)
 			auth.POST("/system/webhook/test", handler.TestWebhookNotification)

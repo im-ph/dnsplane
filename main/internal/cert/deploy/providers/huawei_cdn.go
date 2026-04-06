@@ -30,7 +30,13 @@ func NewHuaweiCDNProvider(config map[string]interface{}) base.DeployProvider {
 
 func (p *HuaweiCDNProvider) getClient() (*cdn.CdnClient, error) {
 	accessKeyID := p.GetString("access_key_id")
+	if accessKeyID == "" {
+		accessKeyID = p.GetString("access_key")
+	}
 	accessKeySecret := p.GetString("access_key_secret")
+	if accessKeySecret == "" {
+		accessKeySecret = p.GetString("secret_key")
+	}
 
 	if accessKeyID == "" || accessKeySecret == "" {
 		return nil, fmt.Errorf("AccessKey不能为空")

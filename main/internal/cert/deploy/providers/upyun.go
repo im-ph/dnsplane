@@ -1,16 +1,46 @@
 package providers
 
 import (
-	"main/internal/cert/deploy/base"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"main/internal/cert"
+	"main/internal/cert/deploy/base"
 	"net/http"
 	"time"
 )
+
+func init() {
+	base.Register("upyun", NewUpyunProvider)
+}
+
+type upyunProvider struct {
+	base.BaseProvider
+	inner *UpyunDeploy
+}
+
+func NewUpyunProvider(config map[string]interface{}) base.DeployProvider {
+	tok := base.GetConfigString(config, "token")
+	return &upyunProvider{
+		BaseProvider: base.BaseProvider{Config: config},
+		inner:        NewUpyunDeploy(map[string]string{"token": tok}),
+	}
+}
+
+func (p *upyunProvider) Check(ctx context.Context) error {
+	return p.inner.Check(ctx)
+}
+
+func (p *upyunProvider) Deploy(ctx context.Context, fullchain, privateKey string, config map[string]interface{}) error {
+	return p.inner.Deploy(ctx, fullchain, privateKey, config)
+}
+
+func (p *upyunProvider) SetLogger(logger cert.Logger) {
+	p.BaseProvider.SetLogger(logger)
+	p.inner.SetLogger(logger)
+}
 
 type UpyunDeploy struct {
 	token  string

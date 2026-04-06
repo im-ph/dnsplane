@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"main/internal/api/middleware"
@@ -103,6 +104,23 @@ func dmTasksScoped(c *gin.Context) *gorm.DB {
 	return q
 }
 
+func buildMonitorTasksListQuery(c *gin.Context, keyword string) *gorm.DB {
+	query := database.WithContext(c).Table("dm_tasks").
+		Select("dm_tasks.*, domains.name as domain").
+		Joins("LEFT JOIN domains ON dm_tasks.did = domains.id")
+
+	if !isAdmin(c) {
+		subSQL, subArgs := userAccessibleDomainIDs(currentUID(c))
+		query = query.Where("dm_tasks.did IN ("+subSQL+")", subArgs...)
+	}
+
+	if keyword != "" {
+		query = query.Where("domains.name LIKE ? OR dm_tasks.rr LIKE ? OR dm_tasks.main_value LIKE ?",
+			"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	return query
+}
+
 func GetMonitorTasks(c *gin.Context) {
 	if !requireMonitorModule(c) {
 		return
@@ -130,26 +148,22 @@ func GetMonitorTasks(c *gin.Context) {
 		Domain string `json:"domain"`
 	}
 
-	query := database.WithContext(c).Table("dm_tasks").
-		Select("dm_tasks.*, domains.name as domain").
-		Joins("LEFT JOIN domains ON dm_tasks.did = domains.id")
-
-	if !isAdmin(c) {
-		subSQL, subArgs := userAccessibleDomainIDs(currentUID(c))
-		query = query.Where("dm_tasks.did IN ("+subSQL+")", subArgs...)
-	}
-
-	if req.Keyword != "" {
-		query = query.Where("domains.name LIKE ? OR dm_tasks.rr LIKE ? OR dm_tasks.main_value LIKE ?",
-			"%"+req.Keyword+"%", "%"+req.Keyword+"%", "%"+req.Keyword+"%")
-	}
-
 	var total int64
-	query.Count(&total)
-	query.Order("dm_tasks.id DESC").
-		Offset((req.Page - 1) * req.PageSize).
-		Limit(req.PageSize).
-		Find(&tasks)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		buildMonitorTasksListQuery(c, req.Keyword).Count(&total)
+	}()
+	go func() {
+		defer wg.Done()
+		buildMonitorTasksListQuery(c, req.Keyword).
+			Order("dm_tasks.id DESC").
+			Offset((req.Page - 1) * req.PageSize).
+			Limit(req.PageSize).
+			Find(&tasks)
+	}()
+	wg.Wait()
 
 	middleware.SuccessResponse(c, gin.H{"total": total, "list": tasks})
 }
@@ -530,18 +544,6 @@ func GetMonitorOverview(c *gin.Context) {
 		return
 	}
 
-	var taskCount int64
-	var activeCount int64
-	var healthyCount int64
-	var faultyCount int64
-	var switchCount int64
-	var failCount int64
-
-	dmTasksScoped(c).Count(&taskCount)
-	dmTasksScoped(c).Where("active = ?", true).Count(&activeCount)
-	dmTasksScoped(c).Where("active = ? AND status = ?", true, 0).Count(&healthyCount)
-	dmTasksScoped(c).Where("status = ?", 1).Count(&faultyCount)
-
 	yesterday := time.Now().Add(-24 * time.Hour)
 	dmLogsInScope := func() *gorm.DB {
 		q := database.WithContext(c).Model(&models.DMLog{}).Where("created_at >= ?", yesterday)
@@ -551,11 +553,6 @@ func GetMonitorOverview(c *gin.Context) {
 		}
 		return q
 	}
-	dmLogsInScope().Count(&switchCount)
-	dmLogsInScope().Where("action = ?", 1).Count(&failCount)
-
-	// 计算24h平均可用率（仅统计当前用户可见任务）
-	var totalChecks, successChecks int64
 	scopedCheck := func() *gorm.DB {
 		q := database.LogDB.Model(&models.DMCheckLog{}).Where("created_at >= ?", yesterday)
 		if !isAdmin(c) {
@@ -564,8 +561,52 @@ func GetMonitorOverview(c *gin.Context) {
 		}
 		return q
 	}
-	scopedCheck().Count(&totalChecks)
-	scopedCheck().Where("success = ?", true).Count(&successChecks)
+
+	var taskCount, activeCount, healthyCount, faultyCount int64
+	var switchCount, failCount int64
+	var totalChecks, successChecks int64
+	var sysCfgs []models.SysConfig
+
+	var wg sync.WaitGroup
+	wg.Add(9)
+	go func() {
+		defer wg.Done()
+		dmTasksScoped(c).Count(&taskCount)
+	}()
+	go func() {
+		defer wg.Done()
+		dmTasksScoped(c).Where("active = ?", true).Count(&activeCount)
+	}()
+	go func() {
+		defer wg.Done()
+		dmTasksScoped(c).Where("active = ? AND status = ?", true, 0).Count(&healthyCount)
+	}()
+	go func() {
+		defer wg.Done()
+		dmTasksScoped(c).Where("status = ?", 1).Count(&faultyCount)
+	}()
+	go func() {
+		defer wg.Done()
+		dmLogsInScope().Count(&switchCount)
+	}()
+	go func() {
+		defer wg.Done()
+		dmLogsInScope().Where("action = ?", 1).Count(&failCount)
+	}()
+	go func() {
+		defer wg.Done()
+		scopedCheck().Count(&totalChecks)
+	}()
+	go func() {
+		defer wg.Done()
+		scopedCheck().Where("success = ?", true).Count(&successChecks)
+	}()
+	go func() {
+		defer wg.Done()
+		database.WithContext(c).Model(&models.SysConfig{}).Where("`key` IN ?", []string{"run_time", "run_count"}).Find(&sysCfgs)
+	}()
+	wg.Wait()
+
 	avgUptime := float64(0)
 	if totalChecks > 0 {
 		avgUptime = math.Round(float64(successChecks)/float64(totalChecks)*10000) / 100
@@ -573,8 +614,14 @@ func GetMonitorOverview(c *gin.Context) {
 
 	var runTime, runCountStr string
 	var runCount int64
-	database.WithContext(c).Model(&models.SysConfig{}).Where("`key` = ?", "run_time").Pluck("value", &runTime)
-	database.WithContext(c).Model(&models.SysConfig{}).Where("`key` = ?", "run_count").Pluck("value", &runCountStr)
+	for _, row := range sysCfgs {
+		switch row.Key {
+		case "run_time":
+			runTime = row.Value
+		case "run_count":
+			runCountStr = row.Value
+		}
+	}
 	if runCountStr != "" {
 		fmt.Sscanf(runCountStr, "%d", &runCount)
 	}

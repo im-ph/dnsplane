@@ -1,9 +1,9 @@
 package servers
 
 import (
-	"main/internal/cert/deploy/base"
 	"context"
 	"fmt"
+	"main/internal/cert/deploy/base"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,8 +27,8 @@ func NewLocalProvider(config map[string]interface{}) base.DeployProvider {
 }
 
 func (p *LocalProvider) Check(ctx context.Context) error {
-	certPath := p.GetString("cert_path")
-	keyPath := p.GetString("key_path")
+	certPath := firstStringInMap(p.Config, "cert_path", "pem_cert_file")
+	keyPath := firstStringInMap(p.Config, "key_path", "pem_key_file")
 
 	if certPath == "" {
 		return fmt.Errorf("证书路径不能为空")
@@ -51,9 +51,22 @@ func (p *LocalProvider) Check(ctx context.Context) error {
 }
 
 func (p *LocalProvider) Deploy(ctx context.Context, fullchain, privateKey string, config map[string]interface{}) error {
-	certPath := p.GetStringFrom(config, "cert_path")
-	keyPath := p.GetStringFrom(config, "key_path")
-	restartCmd := p.GetStringFrom(config, "restart_cmd")
+	format := strings.TrimSpace(firstStringInMap(config, "format"))
+	if format == "pfx" || format == "jks" {
+		return fmt.Errorf("本地部署当前仅支持 PEM 格式")
+	}
+	certPath := firstStringInMap(config, "cert_path", "pem_cert_file")
+	if certPath == "" {
+		certPath = p.GetStringFrom(config, "cert_path")
+	}
+	keyPath := firstStringInMap(config, "key_path", "pem_key_file")
+	if keyPath == "" {
+		keyPath = p.GetStringFrom(config, "key_path")
+	}
+	restartCmd := firstStringInMap(config, "restart_cmd", "reload_cmd", "cmd")
+	if restartCmd == "" {
+		restartCmd = p.GetStringFrom(config, "restart_cmd")
+	}
 	if restartCmd == "" {
 		restartCmd = p.GetStringFrom(config, "reload_cmd")
 	}
@@ -90,18 +103,21 @@ func (p *LocalProvider) Deploy(ctx context.Context, fullchain, privateKey string
 		}
 	}
 
-	if restartCmd != "" {
-		p.Log("正在执行重启命令: " + restartCmd)
+	restartLines := splitExecLines(restartCmd)
+	for _, line := range restartLines {
+		p.Log("正在执行重启命令: " + line)
 		var cmd *exec.Cmd
 		if isWindows() {
-			cmd = exec.CommandContext(ctx, "cmd", "/c", restartCmd)
+			cmd = exec.CommandContext(ctx, "cmd", "/c", line)
 		} else {
-			cmd = exec.CommandContext(ctx, "sh", "-c", restartCmd)
+			cmd = exec.CommandContext(ctx, "sh", "-c", line)
 		}
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("执行重启命令失败: %s, %w", string(output), err)
 		}
+	}
+	if len(restartLines) > 0 {
 		p.Log("重启命令执行成功")
 	}
 
