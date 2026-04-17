@@ -34,9 +34,14 @@ type userPublicRow struct {
 	LastTime    *time.Time `json:"last_time"`
 }
 
-// generateAPIKey 生成随机API Key
+// generateAPIKey 生成随机 API Key。
+//
+// 安全审计 L-4：从 16 字节 (128bit) 提升至 32 字节 (256bit)。
+// API Key 同时充当 HMAC-SHA256 的签名密钥（见 apikey.go），
+// HMAC 密钥的有效强度 = min(key_len, hash_output_len)；32 字节可完全利用 SHA-256 的安全边界。
+// 输出为 64 位 hex 字符串，与原 32 位 hex 相比 URL 长度仅翻倍，无运行期负担。
 func generateAPIKey() string {
-	bytes := make([]byte, 16)
+	bytes := make([]byte, 32)
 	rand.Read(bytes)
 	return hex.EncodeToString(bytes)
 }

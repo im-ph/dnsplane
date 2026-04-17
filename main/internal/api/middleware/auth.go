@@ -343,20 +343,27 @@ func StoreRefreshJTI(userID, jti string) {
  * validateAndRevokeRefreshJTI 验证 refresh token 的 JTI 是否为当前有效值
  * 验证通过后立即删除（一次性使用），防止 token 重用攻击
  * 返回 true 表示 JTI 有效
+ *
+ * 安全审计 L-1：旧实现在缓存无记录时一律放行（为兼容历史 token 签发的场景），
+ * 放大了 Refresh Token Replay 攻击窗口。收紧策略：缓存未初始化视为服务降级，仍放行；
+ * 一旦缓存就绪但该用户的 JTI 条目缺失（TTL 过期或 Redis 丢失），直接拒绝，
+ * 强制用户重新登录，避免旧 refresh token 被复用。
  */
 func validateAndRevokeRefreshJTI(userID, jti string) bool {
 	if cache.C == nil {
-		return true // 无缓存时跳过 JTI 检查
+		return true // 缓存未就绪：服务降级放行（不拒绝正常用户）
 	}
 	key := RefreshJTIPrefix + userID
 	storedJTI, ok := cache.C.Get(key)
 	if !ok {
-		return true // 无记录时允许（兼容旧 token）
+		// 缓存就绪但条目缺失：可能 TTL 过期或攻击者重放旧 token，一律拒绝
+		logger.Warn("[Auth] refresh token 未找到有效 JTI 记录，拒绝刷新 (user=%s)", userID)
+		return false
 	}
 	if storedJTI != jti {
 		// JTI 不匹配：可能是 token 重用攻击，吊销该用户所有 refresh token
 		cache.C.Delete(key)
-		logger.Warn("[Auth] refresh token JTI 不匹配，可能存在 token 重用攻击 (user=%s)", userID)
+		logger.Warn("[Auth] refresh token JTI 不匹配，疑似重用攻击 (user=%s)", userID)
 		return false
 	}
 	// 验证通过，删除旧 JTI（新的会在生成新 token 后存入）

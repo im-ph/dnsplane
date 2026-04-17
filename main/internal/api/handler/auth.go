@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"math/big"
 	"encoding/json"
 	"main/internal/api/middleware"
 	"main/internal/cache"
@@ -30,6 +31,17 @@ var store = base64Captcha.DefaultMemStore
 // bcryptCost 密码哈希成本因子（安全审计 M-6：DefaultCost=10 → 12，匹配 OWASP 2024 建议）。
 // 每提升 1 档，哈希耗时约翻倍；12 档在普通 CPU 上约 250ms，用户登录无感。
 const bcryptCost = 12
+
+// loginDelayJitter 登录失败分支的随机抖动延迟（安全审计 L-2 缓解）。
+// 让"密码错误"、"TOTP 错"、"账户禁用"、"未找到用户"等路径耗时趋同，
+// 降低攻击者通过响应时序推断账号是否存在 / 是否启用 TOTP 的可行性。
+func loginDelayJitter() {
+	n, err := rand.Int(rand.Reader, big.NewInt(100))
+	if err != nil {
+		n = big.NewInt(50)
+	}
+	time.Sleep(time.Duration(50+n.Int64()) * time.Millisecond)
+}
 
 // 登录暴力破解防护（安全审计 H-5）。
 // 以 IP+用户名 双维度计数，窗口 15 分钟内失败次数超过阈值即拒绝。
@@ -143,6 +155,7 @@ func Login(c *gin.Context) {
 	// 暴力破解锁定检查（安全审计 H-5），失败 N 次后 TTL 内强制拒绝
 	if loginBlocked(ip, req.Username) {
 		logger.Warn("用户登录被锁定: IP=%s 用户名=%s", ip, req.Username)
+		loginDelayJitter()
 		c.JSON(http.StatusTooManyRequests, gin.H{"code": -1, "msg": "登录失败次数过多，请 15 分钟后再试"})
 		return
 	}
@@ -171,12 +184,14 @@ func Login(c *gin.Context) {
 	if err := database.DB.Where("username = ?", req.Username).First(&user).Error; err != nil {
 		noteLoginFailure(ip, req.Username)
 		logger.Info("用户登录失败: 用户名或密码错误 - 用户名: %s", req.Username)
+		loginDelayJitter()
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "用户名或密码错误"})
 		return
 	}
 
 	if user.Status != 1 {
 		logger.Info("用户登录失败: 账户已被禁用 - 用户名: %s", req.Username)
+		loginDelayJitter()
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "账户已被禁用"})
 		return
 	}
@@ -184,6 +199,7 @@ func Login(c *gin.Context) {
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
 		noteLoginFailure(ip, req.Username)
 		logger.Info("用户登录失败: 用户名或密码错误 - 用户名: %s", req.Username)
+		loginDelayJitter()
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "用户名或密码错误"})
 		return
 	}
@@ -197,6 +213,7 @@ func Login(c *gin.Context) {
 		if !utils.VerifyTOTPCode(user.TOTPSecret, req.TOTPCode) {
 			noteLoginFailure(ip, req.Username)
 			logger.Info("用户登录失败: TOTP验证码错误 - 用户名: %s", req.Username)
+			loginDelayJitter()
 			c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "验证码错误"})
 			return
 		}

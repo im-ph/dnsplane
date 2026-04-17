@@ -39,7 +39,14 @@ fi
 
 # 2) 后端交叉编译
 mkdir -p dist
-VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
+# 版本号优先级：环境变量 VERSION > 仓库根 VERSION 文件 > git describe > dev
+if [ -z "${VERSION:-}" ]; then
+  if [ -f VERSION ]; then
+    VERSION="$(tr -d '[:space:]' < VERSION)"
+  else
+    VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+  fi
+fi
 LDFLAGS="-s -w -X main.Version=${VERSION}"
 
 for ARCH in "${ARCHS[@]}"; do
