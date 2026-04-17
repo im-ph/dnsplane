@@ -101,16 +101,41 @@ $:
             done
             sha256sum *.tar.gz > SHA256SUMS
             ls -lh
+        # 自实现 changelog 生成，替代 cnbcool/changelog。
+        # 原因：cnbcool/changelog 内部强依赖 `git describe --tags --abbrev=0 ${TAG}^`
+        #       找上一个 tag；首次发布或基准 tag 不是 HEAD 祖先时会 fatal 退出，
+        #       直接拖垮整条流水线。此处用 try/catch 逻辑优雅降级：
+        #       - 有上游 tag   → 生成 PREV_TAG..CURRENT_TAG 之间的提交列表
+        #       - 无上游 tag   → 列出从仓库初始到当前 tag 的全部提交（首次发布）
         - name: changelog
-          image: cnbcool/changelog
-          exports:
-            latestChangeLog: LATEST_CHANGE_LOG
+          script: |
+            set -eu
+            PREV_TAG=$(git describe --tags --abbrev=0 "${CNB_BRANCH}^" 2>/dev/null || true)
+            if [ -n "${PREV_TAG}" ]; then
+              RANGE="${PREV_TAG}..${CNB_BRANCH}"
+              TITLE="变更日志（${PREV_TAG} → ${CNB_BRANCH}）"
+            else
+              RANGE="${CNB_BRANCH}"
+              TITLE="变更日志（首次发布）"
+            fi
+            {
+              echo "## ${TITLE}"
+              echo ""
+              if ! git log --no-merges --pretty=format:"- %s (%h)" "${RANGE}" 2>/dev/null | head -200; then
+                echo "- 无法枚举提交历史，见仓库 Git log"
+              fi
+              echo ""
+            } > CHANGELOG_PARTIAL.md
+            echo "[changelog] PREV_TAG=${PREV_TAG:-<none>}  RANGE=${RANGE}"
+            echo "--- CHANGELOG_PARTIAL.md ---"
+            cat CHANGELOG_PARTIAL.md
         - name: compose release notes
           script: |
             set -eu
             IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${CNB_BRANCH}"
             {
-              printf '%s\n\n' "${LATEST_CHANGE_LOG}"
+              cat CHANGELOG_PARTIAL.md
+              echo ""
               echo "## 📦 Artifacts"
               echo ""
               echo "### Binaries"
