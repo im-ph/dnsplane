@@ -1,23 +1,34 @@
 # CNB CI/CD 流水线
-# 目标：push 主干/标签时自动构建 Linux amd64 + arm64 二进制，tag_push 同时推多架构 Docker 镜像到 CNB 镜像源。
-# 依赖：
-#   - main/vendor 已入库，后端 go build 使用 -mod=vendor 无需联网拉 Go 依赖
-#   - 前端由 Node 22 构建，产物经 scripts/sync-main-web.cjs 放到 main/web 供 go:embed 打包
-#   - Dockerfile 已支持 TARGETOS/TARGETARCH/TARGETVARIANT，docker buildx 多架构直接可用
+# 参考：https://cnb.cool/examples/ecosystem/golang-build
+#       https://cnb.cool/examples/ecosystem/docker-buildx-multi-platform-example
+#
+# 事件：
+#   - master push ：交叉编译 Linux amd64 + arm64 二进制，上传为 commit 附件
+#   - tag_push    ：编译 + 打包 + 生成 changelog + 创建 Release
+#                   + 上传二进制到 Release 附件
+#                   + 构建并推送多架构 Docker 镜像到 CNB 制品库
+#
+# CNB 内置环境变量：
+#   CNB_DOCKER_REGISTRY     当前 CNB 制品库域名（如 docker.cnb.cool）
+#   CNB_REPO_SLUG_LOWERCASE owner/repo（小写）
+#   CNB_TOKEN / CNB_TOKEN_USER_NAME  自动化 token，用于登录制品库
+#   CNB_TAG_NAME            tag_push 时自动注入
+#   CNB_COMMIT              当前 commit sha
+#
+# 依赖约定：
+#   main/vendor 已入库 → go build -mod=vendor 离线编译
+#   web/ 前端由各 pipeline 的 frontend 阶段单独构建；Dockerfile 内置前端构建
+#   （docker 镜像 pipeline 无需依赖其他 pipeline 的前端产物）
 
-$:
-  # 任意分支 push：交叉编译两个架构的二进制并归档
+master:
   push:
-    - name: build-binaries
-      runner:
-        cpus: 4
-      docker:
+    - docker:
         image: docker.io/library/golang:1.26.2-bookworm
       env:
         CGO_ENABLED: "0"
         GOFLAGS: "-mod=vendor"
       stages:
-        - name: build-frontend
+        - name: build frontend
           image: docker.io/library/node:22-bookworm-slim
           script: |
             set -eux
@@ -27,20 +38,20 @@ $:
             npm config set fetch-retry-maxtimeout 120000
             npm ci
             npm run build:ci
-        - name: build-linux-amd64
+        - name: build linux amd64
           script: |
             set -eux
             mkdir -p dist
             cd main
-            GOOS=linux GOARCH=amd64 \
-              go build -trimpath -buildvcs=false -ldflags="-s -w" \
+            GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
+              -ldflags="-s -w -X main.Version=${CNB_COMMIT}" \
               -o ../dist/dnsplane-linux-amd64 .
-        - name: build-linux-arm64
+        - name: build linux arm64
           script: |
             set -eux
             cd main
-            GOOS=linux GOARCH=arm64 \
-              go build -trimpath -buildvcs=false -ldflags="-s -w" \
+            GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false \
+              -ldflags="-s -w -X main.Version=${CNB_COMMIT}" \
               -o ../dist/dnsplane-linux-arm64 .
         - name: checksums
           script: |
@@ -48,115 +59,147 @@ $:
             cd dist
             sha256sum dnsplane-linux-* > SHA256SUMS
             ls -lh
-      artifacts:
-        - dist/
+        - name: upload commit attachments
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - ./dist/dnsplane-linux-amd64
+              - ./dist/dnsplane-linux-arm64
+              - ./dist/SHA256SUMS
 
-  # 标签 push（例如 v1.2.3）：除了二进制，再构建并推送多架构 Docker 镜像
+$:
   tag_push:
-    - name: release-binaries
-      runner:
-        cpus: 4
-      docker:
+    # pipeline A：二进制编译 + changelog + release + 附件
+    - docker:
         image: docker.io/library/golang:1.26.2-bookworm
       env:
         CGO_ENABLED: "0"
         GOFLAGS: "-mod=vendor"
       stages:
-        - name: build-frontend
+        - name: build frontend
           image: docker.io/library/node:22-bookworm-slim
           script: |
             set -eux
             cd web && npm ci && npm run build:ci
-        - name: build-all
+        - name: build all arches
           script: |
             set -eux
             mkdir -p dist
             cd main
             for arch in amd64 arm64; do
-              GOOS=linux GOARCH=$arch \
-                go build -trimpath -buildvcs=false \
-                -ldflags="-s -w -X main.Version=${CNB_TAG_NAME:-dev}" \
+              GOOS=linux GOARCH=$arch go build -trimpath -buildvcs=false \
+                -ldflags="-s -w -X main.Version=${CNB_TAG_NAME}" \
                 -o "../dist/dnsplane-linux-${arch}" .
             done
-        - name: package
+        - name: package tarballs
           script: |
             set -eux
             cd dist
             for arch in amd64 arm64; do
-              tar -czf "dnsplane-${CNB_TAG_NAME:-dev}-linux-${arch}.tar.gz" \
+              tar -czf "dnsplane-${CNB_TAG_NAME}-linux-${arch}.tar.gz" \
                 "dnsplane-linux-${arch}"
             done
             sha256sum *.tar.gz > SHA256SUMS
             ls -lh
-      artifacts:
-        - dist/
+        - name: changelog
+          image: cnbcool/changelog
+          exports:
+            latestChangeLog: LATEST_CHANGE_LOG
+        - name: compose release notes
+          script: |
+            set -eu
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${CNB_TAG_NAME}"
+            {
+              printf '%s\n\n' "${LATEST_CHANGE_LOG}"
+              echo "## 📦 Artifacts"
+              echo ""
+              echo "### Binaries"
+              echo ""
+              echo "- \`dnsplane-${CNB_TAG_NAME}-linux-amd64.tar.gz\`"
+              echo "- \`dnsplane-${CNB_TAG_NAME}-linux-arm64.tar.gz\`"
+              echo ""
+              echo "### Docker Image"
+              echo ""
+              echo '```bash'
+              echo "docker pull ${IMAGE}"
+              echo "docker pull ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest"
+              echo '```'
+              echo ""
+              echo "支持架构：linux/amd64, linux/arm64"
+              echo ""
+              echo "### SHA-256"
+              echo ""
+              echo '```'
+              cat dist/SHA256SUMS
+              echo '```'
+            } > RELEASE_NOTES.md
+            echo "--- RELEASE_NOTES.md ---"
+            cat RELEASE_NOTES.md
+        - name: create release
+          type: git:release
+          options:
+            title: ${CNB_TAG_NAME}
+            descriptionFromFile: RELEASE_NOTES.md
+            latest: true
+        - name: upload release attachments
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - ./dist/dnsplane-${CNB_TAG_NAME}-linux-amd64.tar.gz
+              - ./dist/dnsplane-${CNB_TAG_NAME}-linux-arm64.tar.gz
+              - ./dist/SHA256SUMS
 
-    - name: release-docker
-      runner:
-        cpus: 4
-      services:
-        - docker
-      docker:
-        image: docker.io/library/docker:27
-      env:
-        DOCKER_BUILDKIT: "1"
+    # pipeline B：多架构 Docker 镜像构建与推送（与 A 并行）
+    - services:
+        - name: docker
+          options:
+            rootlessBuildkitd:
+              enabled: true
       stages:
-        - name: login
-          # CNB 内置 $CNB_TOKEN 登录到 docker.cnb.cool；无需额外 Secrets
+        - name: docker login
           script: |
             set -eux
-            echo "${CNB_TOKEN}" | docker login docker.cnb.cool \
-              -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin
-        - name: buildx-init
+            echo "${CNB_TOKEN}" | docker login \
+              -u "${CNB_TOKEN_USER_NAME}" --password-stdin \
+              "${CNB_DOCKER_REGISTRY}"
+        - name: buildx multi-arch build and push
           script: |
             set -eux
-            docker buildx create --use --name multiarch --driver docker-container
-            docker buildx inspect --bootstrap
-        - name: build-and-push
-          script: |
-            set -eux
-            TAG="${CNB_TAG_NAME:-dev}"
-            IMAGE="docker.cnb.cool/neko_kernel/dnsplane"
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             docker buildx build \
               --platform linux/amd64,linux/arm64 \
-              --tag "${IMAGE}:${TAG}" \
+              --build-arg VERSION="${CNB_TAG_NAME}" \
+              --tag "${IMAGE}:${CNB_TAG_NAME}" \
               --tag "${IMAGE}:latest" \
-              --label "org.opencontainers.image.source=https://cnb.cool/Neko_Kernel/DNSPlane" \
-              --label "org.opencontainers.image.revision=${CNB_COMMIT:-}" \
-              --label "org.opencontainers.image.version=${TAG}" \
-              --cache-from type=registry,ref=${IMAGE}:buildcache \
-              --cache-to type=registry,ref=${IMAGE}:buildcache,mode=max \
+              --label "org.opencontainers.image.source=https://cnb.cool/${CNB_REPO_SLUG_LOWERCASE}" \
+              --label "org.opencontainers.image.version=${CNB_TAG_NAME}" \
+              --label "org.opencontainers.image.revision=${CNB_COMMIT}" \
               --push \
               .
 
-  # 手动触发：与 tag_push 等价，便于临时补发镜像
+  # 手动触发：为当前 commit 生成一个多架构 Docker 镜像（tag 为分支+短 sha），便于临时出图
   web_trigger:
-    - name: manual-release-docker
-      runner:
-        cpus: 4
-      services:
-        - docker
-      docker:
-        image: docker.io/library/docker:27
-      env:
-        DOCKER_BUILDKIT: "1"
+    - services:
+        - name: docker
+          options:
+            rootlessBuildkitd:
+              enabled: true
       stages:
-        - name: login
+        - name: docker login
           script: |
             set -eux
-            echo "${CNB_TOKEN}" | docker login docker.cnb.cool \
-              -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin
-        - name: buildx-init
+            echo "${CNB_TOKEN}" | docker login \
+              -u "${CNB_TOKEN_USER_NAME}" --password-stdin \
+              "${CNB_DOCKER_REGISTRY}"
+        - name: buildx multi-arch build and push
           script: |
             set -eux
-            docker buildx create --use --name multiarch --driver docker-container
-        - name: build-and-push
-          script: |
-            set -eux
-            TAG="${CNB_BRANCH//\//-}-${CNB_COMMIT:0:7}"
-            IMAGE="docker.cnb.cool/neko_kernel/dnsplane"
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+            SHORT_SHA="$(echo "${CNB_COMMIT}" | cut -c1-7)"
+            TAG="manual-${CNB_BRANCH//\//-}-${SHORT_SHA}"
             docker buildx build \
               --platform linux/amd64,linux/arm64 \
+              --build-arg VERSION="${TAG}" \
               --tag "${IMAGE}:${TAG}" \
               --push \
               .
