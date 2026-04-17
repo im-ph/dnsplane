@@ -473,6 +473,25 @@ func SecurityHeaders() gin.HandlerFunc {
 		c.Header("X-XSS-Protection", "1; mode=block")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		/*
+		 * Content-Security-Policy（安全审计 M-8）：
+		 * - default-src 'self'：脚本/样式/字体/图片默认仅允许同源
+		 * - 'unsafe-inline' 的样式/脚本放行是 Next.js 静态导出的必需妥协（内联 CSS、运行时 hydration）
+		 * - img-src 额外允许 data: 以支持 base64 验证码
+		 * - connect-src 'self' 对应前端只向同源 /api 发请求（与 CORS 策略一致）
+		 * - object-src 'none' + base-uri 'self' 阻断插件与 base 劫持
+		 * - frame-ancestors 对齐 X-Frame-Options=SAMEORIGIN
+		 */
+		c.Header("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline' 'unsafe-eval'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data: blob:; "+
+				"font-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"object-src 'none'; "+
+				"base-uri 'self'; "+
+				"frame-ancestors 'self'")
 		/* 直连或反代 HTTPS 时提示浏览器仅走 HTTPS（不默认 includeSubDomains，避免误伤兄弟域名） */
 		if isSecureRequest(c) {
 			c.Header("Strict-Transport-Security", "max-age=31536000")

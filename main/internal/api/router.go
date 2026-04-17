@@ -187,7 +187,7 @@ func SetupRouter(staticFS embed.FS) *gin.Engine {
 
 	subFS, err := fs.Sub(staticFS, "web")
 	if err != nil {
-		panic("failed to create sub filesystem: " + err.Error())
+		panic("创建内嵌静态文件子系统失败: " + err.Error())
 	}
 
 	// 获取Content-Type

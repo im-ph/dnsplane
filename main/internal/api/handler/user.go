@@ -9,6 +9,7 @@ import (
 	"main/internal/database"
 	"main/internal/dbcache"
 	"main/internal/models"
+	"main/internal/utils"
 	"net/http"
 	"strconv"
 	"time"
@@ -71,7 +72,7 @@ func GetUsers(c *gin.Context) {
 
 type CreateUserRequest struct {
 	Username    string `json:"username" binding:"required"`
-	Password    string `json:"password" binding:"required,min=6"`
+	Password    string `json:"password" binding:"required,min=8"`
 	Email       string `json:"email"`
 	Level       int    `json:"level"`
 	IsAPI       bool   `json:"is_api"`
@@ -92,7 +93,13 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	// 强密码复杂度校验（安全审计 H-4）
+	if msg := utils.ValidatePasswordStrength(req.Password); msg != "" {
+		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": msg})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "密码加密失败"})
 		return
@@ -154,7 +161,7 @@ func UpdateUser(c *gin.Context) {
 	}
 
 	if req.Password != "" {
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 		updates["password"] = string(hashedPassword)
 	}
 

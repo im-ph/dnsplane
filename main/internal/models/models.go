@@ -161,6 +161,9 @@ type DMTask struct {
 	NotifyEnabled  bool   `gorm:"default:false" json:"notify_enabled"`
 	NotifyChannels string `gorm:"type:text" json:"notify_channels"` // JSON 数组字符串，如 ["mail","webhook"]
 	AutoRestore    bool   `gorm:"default:false" json:"auto_restore"`
+	// AllowInsecureTLS 允许 HTTPS 探测跳过证书校验（自签 / 内网场景下手动勾选）；
+	// 默认 false 对应安全审计 H-3，拒绝静默放过证书错误。
+	AllowInsecureTLS bool `gorm:"default:false" json:"allow_insecure_tls"`
 }
 
 // DMCheckLog 容灾监控探测历史

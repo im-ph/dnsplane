@@ -20,7 +20,8 @@ var DefaultMigrateSpecs = []MigrateSpec{
 	{Table: "cert_orders", Columns: []string{"private_key", "info"}},
 	{Table: "cert_deploys", Columns: []string{"config", "info"}},
 	{Table: "dm_tasks", Columns: []string{"proxy_password"}},
-	{Table: "users", Columns: []string{"totp_secret", "reset_token"}},
+	// users.reset_token 不在此列表：采用 sha256 指纹而非可逆加密（见 handler/auth.go）
+	{Table: "users", Columns: []string{"totp_secret"}},
 	{Table: "user_oauths", Columns: []string{"access_token", "refresh_token"}},
 }
 

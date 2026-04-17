@@ -35,7 +35,7 @@ func deriveKey() []byte {
 		cfg := config.Get()
 		if cfg == nil || strings.TrimSpace(cfg.Security.MasterKey) == "" {
 			// 理论不可达：config.Load 已保证非空
-			panic("crypto: security.master_key is empty; check config initialization")
+			panic("crypto: 加密主密钥 security.master_key 为空，请检查配置加载流程")
 		}
 		h := sha256.Sum256([]byte(cfg.Security.MasterKey))
 		cached = h[:]

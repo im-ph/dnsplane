@@ -19,7 +19,6 @@ import (
 //   CertDeploy.Info        部署器运行态
 //   DMTask.ProxyPassword   容灾探测代理密码
 //   User.TOTPSecret        TOTP 共享密钥
-//   User.ResetToken        密码/TOTP 重置临时 token（短期）
 //   UserOAuth.AccessToken  三方 OAuth access token
 //   UserOAuth.RefreshToken 三方 OAuth refresh token
 //
@@ -74,11 +73,13 @@ func (d *CertDeploy) AfterFind(*gorm.DB) error {
 func (t *DMTask) BeforeSave(*gorm.DB) error { return encFields(&t.ProxyPassword) }
 func (t *DMTask) AfterFind(*gorm.DB) error  { decFields(&t.ProxyPassword); return nil }
 
+// User.ResetToken 不走加密钩子：使用 sha256(token) 落库（见 handler/auth.go hashResetToken）；
+// 原因是 GORM Updates(map) 不触发 BeforeSave 钩子，曾导致明文落库（安全审计 H-6）。
 func (u *User) BeforeSave(*gorm.DB) error {
-	return encFields(&u.TOTPSecret, &u.ResetToken)
+	return encFields(&u.TOTPSecret)
 }
 func (u *User) AfterFind(*gorm.DB) error {
-	decFields(&u.TOTPSecret, &u.ResetToken)
+	decFields(&u.TOTPSecret)
 	return nil
 }
 

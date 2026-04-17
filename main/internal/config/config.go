@@ -170,7 +170,8 @@ func generateRandomSecret(length int) string {
 func saveConfig(path string, cfg *Config) error {
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		// 0700：仅 owner 可访问配置目录（含密钥）
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
 	}
@@ -178,7 +179,8 @@ func saveConfig(path string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	// 0600：仅 owner 可读写，防止同机其他用户读取 JWT secret / master_key / DB 密码（安全审计 M-5）
+	return os.WriteFile(path, data, 0600)
 }
 
 func Get() *Config {
@@ -193,5 +195,6 @@ func Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	// 0600：仅 owner 可读写，防止同机其他用户读取 JWT secret / master_key / DB 密码（安全审计 M-5）
+	return os.WriteFile(path, data, 0600)
 }

@@ -13,7 +13,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -300,6 +299,8 @@ func migrateRequestDB() error {
 	)
 }
 
+// initAdmin 仅处理 id=1 历史用户的等级提升；首次部署必须走 /api/install 流程设置管理员密码，
+// 不再硬编码默认凭据（旧版 admin/admin123 存在严重安全风险，详见安全审计 H-1）。
 func initAdmin() error {
 	var count int64
 	DB.Model(&models.User{}).Count(&count)
@@ -307,24 +308,8 @@ func initAdmin() error {
 		DB.Model(&models.User{}).Where("id = 1 AND level < 2").Update("level", 2)
 		return nil
 	}
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-
-	admin := models.User{
-		Username: "admin",
-		Password: string(hashedPassword),
-		Level:    2, // 2=管理员
-		Status:   1,
-		RegTime:  time.Now(),
-	}
-
-	if err := DB.Create(&admin).Error; err != nil {
-		return err
-	}
-
-	fmt.Println("已创建默认管理员账户: admin / admin123")
+	// 用户表为空：提示管理员走安装接口，不自动建账
+	logger.Info("数据库未初始化，请访问前端首页或调用 POST /api/install 设置管理员账号")
 	return nil
 }
 

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"main/internal/api/middleware"
@@ -25,6 +26,54 @@ import (
 )
 
 var store = base64Captcha.DefaultMemStore
+
+// bcryptCost 密码哈希成本因子（安全审计 M-6：DefaultCost=10 → 12，匹配 OWASP 2024 建议）。
+// 每提升 1 档，哈希耗时约翻倍；12 档在普通 CPU 上约 250ms，用户登录无感。
+const bcryptCost = 12
+
+// 登录暴力破解防护（安全审计 H-5）。
+// 以 IP+用户名 双维度计数，窗口 15 分钟内失败次数超过阈值即拒绝。
+// 成功登录后清除该 IP+用户名 的计数器。
+const (
+	loginFailWindow    = 15 * time.Minute
+	loginFailThreshold = 5
+)
+
+func loginFailKey(ip, username string) string {
+	return "login_fail:" + ip + ":" + strings.ToLower(strings.TrimSpace(username))
+}
+
+// loginBlocked 返回 true 表示当前 IP+username 组合已被临时锁定。
+func loginBlocked(ip, username string) bool {
+	if cache.C == nil {
+		return false
+	}
+	var n int
+	if cache.C.GetJSON(loginFailKey(ip, username), &n) && n >= loginFailThreshold {
+		return true
+	}
+	return false
+}
+
+// noteLoginFailure 累加一次失败计数（TTL 自动维持）。
+func noteLoginFailure(ip, username string) {
+	if cache.C == nil {
+		return
+	}
+	key := loginFailKey(ip, username)
+	var n int
+	cache.C.GetJSON(key, &n)
+	n++
+	cache.C.SetJSON(key, n, loginFailWindow)
+}
+
+// clearLoginFailure 登录成功或验证码通过后清零计数。
+func clearLoginFailure(ip, username string) {
+	if cache.C == nil {
+		return
+	}
+	cache.C.Delete(loginFailKey(ip, username))
+}
 
 type LoginRequest struct {
 	Username    string `json:"username" binding:"required"`
@@ -89,6 +138,15 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	ip := c.ClientIP()
+
+	// 暴力破解锁定检查（安全审计 H-5），失败 N 次后 TTL 内强制拒绝
+	if loginBlocked(ip, req.Username) {
+		logger.Warn("用户登录被锁定: IP=%s 用户名=%s", ip, req.Username)
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": -1, "msg": "登录失败次数过多，请 15 分钟后再试"})
+		return
+	}
+
 	// Check if captcha is enabled
 	var captchaConfig models.SysConfig
 	needCaptcha := true
@@ -111,6 +169,7 @@ func Login(c *gin.Context) {
 
 	var user models.User
 	if err := database.DB.Where("username = ?", req.Username).First(&user).Error; err != nil {
+		noteLoginFailure(ip, req.Username)
 		logger.Info("用户登录失败: 用户名或密码错误 - 用户名: %s", req.Username)
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "用户名或密码错误"})
 		return
@@ -123,6 +182,7 @@ func Login(c *gin.Context) {
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		noteLoginFailure(ip, req.Username)
 		logger.Info("用户登录失败: 用户名或密码错误 - 用户名: %s", req.Username)
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "用户名或密码错误"})
 		return
@@ -135,11 +195,15 @@ func Login(c *gin.Context) {
 			return
 		}
 		if !utils.VerifyTOTPCode(user.TOTPSecret, req.TOTPCode) {
+			noteLoginFailure(ip, req.Username)
 			logger.Info("用户登录失败: TOTP验证码错误 - 用户名: %s", req.Username)
 			c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "验证码错误"})
 			return
 		}
 	}
+
+	// 登录成功后清除该 IP+用户名 的失败计数
+	clearLoginFailure(ip, req.Username)
 
 	tokenPair, err := middleware.GenerateTokenPair(strconv.FormatUint(uint64(user.ID), 10), user.Username, user.Level)
 	if err != nil {
@@ -253,7 +317,7 @@ func GetUserInfo(c *gin.Context) {
 
 type ChangePasswordRequest struct {
 	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=6"`
+	NewPassword string `json:"new_password" binding:"required,min=8"`
 }
 
 func ChangePassword(c *gin.Context) {
@@ -276,7 +340,13 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	// 强密码复杂度校验（安全审计 H-4：min=8 + 大小写 + 数字）
+	if msg := utils.ValidatePasswordStrength(req.NewPassword); msg != "" {
+		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": msg})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
 	if err != nil {
 		logger.Error("用户修改密码失败: 密码加密失败 - 用户ID: %d, 错误: %v", userID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "密码加密失败"})
@@ -300,14 +370,20 @@ func Install(c *gin.Context) {
 
 	var req struct {
 		Username string `json:"username" binding:"required"`
-		Password string `json:"password" binding:"required,min=6"`
+		Password string `json:"password" binding:"required,min=8"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "msg": "参数错误"})
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	// 强密码复杂度校验（安全审计 H-4）
+	if msg := utils.ValidatePasswordStrength(req.Password); msg != "" {
+		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": msg})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
 		logger.Error("系统安装失败: 密码加密失败 - 错误: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "密码加密失败"})
@@ -487,11 +563,24 @@ func DisableTOTP(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "TOTP已禁用"})
 }
 
-// generateResetToken 生成重置Token
+// generateResetToken 生成发给用户的原始重置 Token（经邮件发送）。
 func generateResetToken() string {
 	bytes := make([]byte, 32)
 	rand.Read(bytes)
 	return hex.EncodeToString(bytes)
+}
+
+// hashResetToken 将用户可见的重置 Token 映射为落库 SHA-256 指纹。
+//
+// 设计动机（对应安全审计 H-6）：
+//   - GORM 的 Updates(map[...]interface{}) 不触发 BeforeSave 钩子，
+//     导致 User.ResetToken 的 AES-GCM 加密被绕过，明文落库；
+//   - 改为落库时存 sha256(token)，明文仅在邮件中存在；
+//     数据库被读取也只能拿到不可逆摘要，攻击者无法用于后续 /reset 接口；
+//   - 查询时对用户提交的 token 同样 SHA-256 后比较，无需可逆解密，天然避开 GORM 钩子坑。
+func hashResetToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // getEmailConfig 获取邮件配置
@@ -580,8 +669,9 @@ func ForgotPassword(c *gin.Context) {
 
 	token := generateResetToken()
 	expireTime := time.Now().Add(30 * time.Minute)
+	// 落库指纹而非明文（详见 hashResetToken 注释）
 	database.DB.Model(&user).Updates(map[string]interface{}{
-		"reset_token":  token,
+		"reset_token":  hashResetToken(token),
 		"reset_type":   "password",
 		"reset_expire": expireTime,
 	})
@@ -599,16 +689,16 @@ func ForgotPassword(c *gin.Context) {
 func ResetPassword(c *gin.Context) {
 	var req struct {
 		Token    string `json:"token" binding:"required"`
-		Password string `json:"password" binding:"required,min=6"`
+		Password string `json:"password" binding:"required,min=8"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": -1, "msg": "参数错误"})
 		return
 	}
 
-	// 查找用户
+	// 查找用户（用 token 的 SHA-256 指纹匹配，与落库值保持一致）
 	var user models.User
-	if err := database.DB.Where("reset_token = ? AND reset_type = ?", req.Token, "password").First(&user).Error; err != nil {
+	if err := database.DB.Where("reset_token = ? AND reset_type = ?", hashResetToken(req.Token), "password").First(&user).Error; err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "无效的重置链接"})
 		return
 	}
@@ -619,8 +709,14 @@ func ResetPassword(c *gin.Context) {
 		return
 	}
 
+	// 强密码复杂度校验（安全审计 H-4）
+	if msg := utils.ValidatePasswordStrength(req.Password); msg != "" {
+		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": msg})
+		return
+	}
+
 	// 加密新密码
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "密码加密失败"})
 		return
@@ -673,7 +769,7 @@ func ForgotTOTP(c *gin.Context) {
 	token := generateResetToken()
 	expireTime := time.Now().Add(30 * time.Minute)
 	database.DB.Model(&user).Updates(map[string]interface{}{
-		"reset_token":  token,
+		"reset_token":  hashResetToken(token),
 		"reset_type":   "totp",
 		"reset_expire": expireTime,
 	})
@@ -699,7 +795,7 @@ func ResetTOTP(c *gin.Context) {
 
 	// 查找用户
 	var user models.User
-	if err := database.DB.Where("reset_token = ? AND reset_type = ?", req.Token, "totp").First(&user).Error; err != nil {
+	if err := database.DB.Where("reset_token = ? AND reset_type = ?", hashResetToken(req.Token), "totp").First(&user).Error; err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "无效的重置链接"})
 		return
 	}
@@ -759,9 +855,9 @@ func AdminSendResetEmail(c *gin.Context) {
 	token := generateResetToken()
 	expireTime := time.Now().Add(60 * time.Minute) // 管理员发送的链接有效期更长
 
-	// 保存Token
+	// 保存 Token 的 SHA-256 指纹（详见 hashResetToken 注释）
 	database.DB.Model(&user).Updates(map[string]interface{}{
-		"reset_token":  token,
+		"reset_token":  hashResetToken(token),
 		"reset_type":   req.Type,
 		"reset_expire": expireTime,
 	})
@@ -1079,7 +1175,7 @@ func SendAuthCode(c *gin.Context) {
 func Register(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`
-		Password string `json:"password" binding:"required,min=6"`
+		Password string `json:"password" binding:"required,min=8"`
 		Email    string `json:"email" binding:"required,email"`
 		Code     string `json:"code" binding:"required"`
 	}
@@ -1113,6 +1209,11 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": err.Error()})
 		return
 	}
+	// 强密码复杂度校验（安全审计 H-4）
+	if msg := utils.ValidatePasswordStrength(req.Password); msg != "" {
+		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": msg})
+		return
+	}
 	var cnt int64
 	database.DB.Model(&models.User{}).Where("username = ?", username).Count(&cnt)
 	if cnt > 0 {
@@ -1124,7 +1225,7 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": -1, "msg": "该邮箱已被注册"})
 		return
 	}
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": -1, "msg": "密码加密失败"})
 		return

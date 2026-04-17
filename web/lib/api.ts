@@ -52,7 +52,7 @@ class ApiClient {
           if (j.code === 0 && j.data?.token) return j.data.token
         }
       } catch {
-        /* 网络错误时返回空值，让本次请求按原逻辑去失败；下次会重试 */
+        /* 网络错误时返回空值，让本次请求按原逻辑去失败，下次会重试 */
       } finally {
         this.csrfInFlight = null
       }
@@ -69,17 +69,23 @@ class ApiClient {
         localStorage.setItem('token', token)
       } else {
         localStorage.removeItem('token')
+        // 清理历史版本残留的 refresh_token（安全审计 M-1：该字段已不再写入 localStorage）
         localStorage.removeItem('refresh_token')
       }
     }
   }
 
-  /** 与 OAuth/注册一致：access 给 Authorization，refresh 供 /api/auth/refresh 等使用 */
-  setTokens(tokens: { token: string; refresh_token: string }) {
+  /**
+   * 与 OAuth/注册一致：access 给 Authorization，refresh 仅靠 HttpOnly Cookie `_rt` 下发。
+   * 安全审计 M-1：refresh_token 曾同时写入 localStorage，XSS 场景可被一次性窃取；
+   * 改为只存服务端 HttpOnly Cookie，前端不再持有明文。
+   */
+  setTokens(tokens: { token: string; refresh_token?: string }) {
     this.token = tokens.token
     if (typeof window !== 'undefined') {
       localStorage.setItem('token', tokens.token)
-      localStorage.setItem('refresh_token', tokens.refresh_token)
+      // 显式移除历史残留
+      localStorage.removeItem('refresh_token')
     }
   }
 
@@ -107,13 +113,12 @@ class ApiClient {
     }
     this.refreshInFlight = (async () => {
       try {
-        const rt =
-          typeof window !== 'undefined' ? localStorage.getItem('refresh_token') || '' : ''
+        // refresh token 仅走 HttpOnly Cookie `_rt`（安全审计 M-1），不再从 localStorage 读明文
         const res = await fetch(`${API_BASE}/auth/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify(rt ? { refresh_token: rt } : {}),
+          body: JSON.stringify({}),
         })
         if (!res.ok) {
           return false
