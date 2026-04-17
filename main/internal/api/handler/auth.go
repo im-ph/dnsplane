@@ -711,10 +711,20 @@ func getSiteURL() string {
 	return "http://localhost:8080"
 }
 
+// 安全审计 R-7：邮件发送 goroutine 限流。
+//
+// ForgotPassword/ForgotTOTP/RequestMagicLink/SendAuthCode 是公开接口，
+// 即便 verify.AllowPublicEmailRequest 限了 IP/邮箱粒度，攻击者用大量邮箱+多 IP
+// 仍可在短时间内堆积大量 SMTP goroutine（每个 dial 超时可达 12s）。
+// 信号量将同时进行的邮件发送数限制在 32，超额请求阻塞排队，邮件库内存/FD 占用可控。
+var mailSendSem = make(chan struct{}, 32)
+
 // enqueueNotifyMail 异步发信，HTTP 立即返回；失败仅记日志（与公开接口模糊成功口径一致）
 func enqueueNotifyMail(task string, cfg notify.EmailConfig, subject, body string) {
 	ec := cfg
 	utils.SafeGoWithName(task, func() {
+		mailSendSem <- struct{}{}        // 信号量获取（达上限即阻塞）
+		defer func() { <-mailSendSem }() // 释放
 		n := notify.NewEmailNotifier(ec)
 		if err := n.Send(context.Background(), subject, body); err != nil {
 			logger.Error("%s: %v", task, err)

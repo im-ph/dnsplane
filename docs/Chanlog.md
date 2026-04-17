@@ -10,9 +10,52 @@
 
 ---
 
-## v1.0.6 — 补 cnb:read-file 的 exports 映射
+## v1.0.7 — 第四轮深度审计：cert 全线 IDOR / SystemConfig 提权 / 通知 SSRF / 邮件 CRLF + 前端类型守卫与并发安全
 
 - **提交**：_待分配_
+- **时间**：2026-04-18
+- **类型**：🟥 Fix（关键安全）
+
+第四轮前后端深度审计结果：后端 11 项 + 前端 8 项；本次修 9 项关键。
+
+### 🔴 后端 Critical
+
+| 编号 | 修复 |
+|------|------|
+| **R-1** cert.go 全线 IDOR | 任意已登录用户可 `GET /api/cert/orders` 列他人订单、`?type=key` 下载他人证书私钥；`POST /process` 强签他人订单烧 LE 配额。新增 `cert_authz.go`：`requireCertAccountOwner` / `requireCertOrderOwner` 助手；`scopeCertAccountQuery` / `scopeCertOrderQuery` 列表 UID 过滤；应用到 `GetCertAccounts/CreateCertAccount/UpdateCertAccount/DeleteCertAccount/GetCertOrders/CreateCertOrder/ProcessCertOrder/GetCertOrderLog/GetCertOrderDetail/DownloadCertOrder/DeleteCertOrder/ToggleCertOrderAuto` 共 12 个 handler |
+| **R-2** SystemConfig 凭据泄露 + 提权 | `GET/POST /api/system/config` 此前无任何鉴权，普通用户可读 mail_password / tgbot_token / webhook_url / oauth_secret 等全部凭据，并写入 site_url 钓鱼 magic-link / 关闭 captcha / 改 webhook_url 触发 SSRF。两 handler 加 `requireAdmin` |
+| **R-3** SetRecordStatus 越权 | 与 CreateRecord/UpdateRecord/DeleteRecord 不一致，缺 CheckDomainPermission；任意拥有任一域名读权限的用户可对全站任意记录调启停 → DoS。补 `middleware.CheckDomainPermission(userID, level, domainID)` |
+
+### 🟡 后端 High
+
+| 编号 | 修复 |
+|------|------|
+| **R-4** 邮件头 CRLF 注入 | `EmailNotifier.Send` 对 `Subject/From/FromName/To` 字段做 `SanitizeMailHeader`，含 `\r\n\x00` 直接拒绝。叠加 R-2 后任意用户可注入 `Bcc:` 钓鱼跳板 |
+| **R-5** Webhook/Discord/Bark/WeChat SSRF | 新增 `notify/safe_url.go` 的 `ValidateOutboundURL`：协议白名单 + 拒绝私网/回环/链路本地/CGNAT/IMDS。Webhook / Discord / Bark / WechatWork 4 个 notifier 出站前校验。Telegram URL 硬编码 `api.telegram.org` 安全 |
+| **R-6** ProcessCertOrder 重复签发竞态 | 原 `order.Status = 1; Save(&order)` 非原子，并发 N 次 process 触发 N 个 ACME goroutine 烧 LE 配额。改 CAS：`UPDATE WHERE id=? AND status!=1`，`RowsAffected=0` 拒绝。手动 + 自动续期路径双修 |
+| **R-7** 邮件发送 goroutine 堆积 DoS | `enqueueNotifyMail` 引入 32 槽信号量 `mailSendSem`；公开接口 (forgot-password / send-code / magic-link) 即便突破 verify rate limit，并发邮件 SMTP dial 也不会无限堆积导致 FD/内存耗尽 |
+
+### 🟡 前端 High
+
+| 编号 | 修复 |
+|------|------|
+| **H-2** `ignoreBuildErrors` | 删除 `next.config.ts` 的 `typescript.ignoreBuildErrors`；类型错误重新成为 CI 拦截器，避免 XSS / 原型污染 / 越权类型混淆隐患悄悄到达运行时 |
+| **M-3** `currentAesKey` 全局并发覆盖 | `lib/crypto.ts` 移除 `currentAesKey` 全局变量；`hybridEncrypt` 不再写入；`decryptResponse(resp, aesKey?)` 缺 aesKey 直接拒解，避免并发请求串台导致信息泄露 |
+
+### 未本轮处理（说明）
+
+- **R-8** LookupRecord 时序泄露 — 信息泄露级别低，下次合并修
+- **R-9** GetMonitorOverview SQL 拼接结构脆弱 — 当前不可注入，结构性弱点
+- **R-10** 错误信息泄露内部细节 — 散布于 ~20 处，需要系统性脱敏，单独 PR 处理
+- **R-11** quic-go / sqlite 等依赖版本提示 — 等下游无 break 再升
+- 前端 H-1 React/Next CVE — 引用的 CVE 号未经独立验证，待官方公告确认后单独升级
+- 前端 M-1/M-2/M-4/M-5、L-1/L-2/L-3 — 非关键，下次集中清理
+
+---
+
+## v1.0.6 — 补 cnb:read-file 的 exports 映射
+
+- **提交**：`b374fcf`
 - **时间**：2026-04-18
 - **类型**：🟥 Fix
 

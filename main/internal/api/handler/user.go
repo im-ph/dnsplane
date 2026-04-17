@@ -531,6 +531,11 @@ func GetLogDetail(c *gin.Context) {
 }
 
 func GetSystemConfig(c *gin.Context) {
+	// 安全审计 R-2：原实现无任何鉴权，普通用户可读取 mail_password / tgbot_token /
+	// webhook_url / oauth_*_secret / turnstile_secret_key 等全部敏感凭据。
+	if !requireAdmin(c) {
+		return
+	}
 	var configs []models.SysConfig
 	database.DB.Find(&configs)
 
@@ -574,6 +579,11 @@ func sysConfigJSONValueToDB(v interface{}) string {
 }
 
 func UpdateSystemConfig(c *gin.Context) {
+	// 安全审计 R-2：原实现无任何鉴权，普通用户可改 site_url 钓鱼 magic-link、
+	// 关闭 login_captcha、改 webhook_url 触发 SSRF 等。
+	if !requireAdmin(c) {
+		return
+	}
 	var req map[string]interface{}
 	if d := middleware.GetDecryptedData(c); d != nil {
 		req = d

@@ -17,8 +17,13 @@ export interface EncryptedPayload {
   iv: string   
   data: string 
 }
-// 保留兼容性，但不再作为并发安全机制
-let currentAesKey: CryptoKey | null = null
+// 安全审计 M-3：移除 currentAesKey 全局变量。
+// 原实现在并发请求场景下（如 dashboard 同时发 4 个 Promise.all 请求）会被后续请求
+// 覆盖，导致解密响应时密钥串台 → 信息泄露。
+// 现在 decryptResponse 强制要求显式传入 aesKey；hybridEncrypt 返回结构不变。
+//
+// （hybridEncrypt 仍然返回 { payload, aesKey }，调用方负责把同请求的 aesKey
+//  穿到 decryptResponse；ApiClient 已正确处理这一点。）
 export async function getPublicKey(): Promise<string> {
   if (publicKeyCache) {
     return publicKeyCache
@@ -246,8 +251,7 @@ export async function hybridEncrypt(data: object | string): Promise<HybridEncryp
     true,
     ['encrypt', 'decrypt']
   )
-  // 保留兼容性赋值（单请求场景仍可用）
-  currentAesKey = aesKey
+  // 不再写入全局变量；并发请求各自持有 aesKey 通过返回值传递
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const encoder = new TextEncoder()
   
@@ -322,8 +326,9 @@ export interface ObfuscatedResponse {
 
 export async function decryptResponse<T>(response: unknown, aesKey?: CryptoKey): Promise<T> {
   const resp = response as Record<string, unknown>
-  // 优先使用传入的 per-request key，回退到全局 currentAesKey
-  const key = aesKey || currentAesKey
+  // 安全审计 M-3：仅使用调用方传入的 per-request key；不再回退到全局变量。
+  // 缺失时直接报错暴露调用方 bug，比静默错配密钥导致信息泄露安全得多。
+  const key = aesKey || null
   
   // 处理混淆格式 (_e, _p._i, _p._d)
   if (resp._e && resp._p) {
