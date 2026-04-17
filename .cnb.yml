@@ -12,7 +12,7 @@
 #   CNB_DOCKER_REGISTRY     当前 CNB 制品库域名（如 docker.cnb.cool）
 #   CNB_REPO_SLUG_LOWERCASE owner/repo（小写）
 #   CNB_TOKEN / CNB_TOKEN_USER_NAME  自动化 token，用于登录制品库
-#   CNB_TAG_NAME            tag_push 时自动注入
+#   CNB_BRANCH              分支名；tag_push 事件下其值为 tag 名（CNB 约定）
 #   CNB_COMMIT              当前 commit sha
 #
 # 依赖约定：
@@ -88,7 +88,7 @@ $:
             cd main
             for arch in amd64 arm64; do
               GOOS=linux GOARCH=$arch go build -trimpath -buildvcs=false \
-                -ldflags="-s -w -X main.Version=${CNB_TAG_NAME}" \
+                -ldflags="-s -w -X main.Version=${CNB_BRANCH}" \
                 -o "../dist/dnsplane-linux-${arch}" .
             done
         - name: package tarballs
@@ -96,7 +96,7 @@ $:
             set -eux
             cd dist
             for arch in amd64 arm64; do
-              tar -czf "dnsplane-${CNB_TAG_NAME}-linux-${arch}.tar.gz" \
+              tar -czf "dnsplane-${CNB_BRANCH}-linux-${arch}.tar.gz" \
                 "dnsplane-linux-${arch}"
             done
             sha256sum *.tar.gz > SHA256SUMS
@@ -108,15 +108,15 @@ $:
         - name: compose release notes
           script: |
             set -eu
-            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${CNB_TAG_NAME}"
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${CNB_BRANCH}"
             {
               printf '%s\n\n' "${LATEST_CHANGE_LOG}"
               echo "## 📦 Artifacts"
               echo ""
               echo "### Binaries"
               echo ""
-              echo "- \`dnsplane-${CNB_TAG_NAME}-linux-amd64.tar.gz\`"
-              echo "- \`dnsplane-${CNB_TAG_NAME}-linux-arm64.tar.gz\`"
+              echo "- \`dnsplane-${CNB_BRANCH}-linux-amd64.tar.gz\`"
+              echo "- \`dnsplane-${CNB_BRANCH}-linux-arm64.tar.gz\`"
               echo ""
               echo "### Docker Image"
               echo ""
@@ -138,15 +138,15 @@ $:
         - name: create release
           type: git:release
           options:
-            title: ${CNB_TAG_NAME}
+            title: ${CNB_BRANCH}
             descriptionFromFile: RELEASE_NOTES.md
             latest: true
         - name: upload release attachments
           image: cnbcool/attachments:latest
           settings:
             attachments:
-              - ./dist/dnsplane-${CNB_TAG_NAME}-linux-amd64.tar.gz
-              - ./dist/dnsplane-${CNB_TAG_NAME}-linux-arm64.tar.gz
+              - ./dist/dnsplane-${CNB_BRANCH}-linux-amd64.tar.gz
+              - ./dist/dnsplane-${CNB_BRANCH}-linux-arm64.tar.gz
               - ./dist/SHA256SUMS
 
     # pipeline B：多架构 Docker 镜像构建与推送（与 A 并行）
@@ -168,11 +168,11 @@ $:
             IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             docker buildx build \
               --platform linux/amd64,linux/arm64 \
-              --build-arg VERSION="${CNB_TAG_NAME}" \
-              --tag "${IMAGE}:${CNB_TAG_NAME}" \
+              --build-arg VERSION="${CNB_BRANCH}" \
+              --tag "${IMAGE}:${CNB_BRANCH}" \
               --tag "${IMAGE}:latest" \
               --label "org.opencontainers.image.source=https://cnb.cool/${CNB_REPO_SLUG_LOWERCASE}" \
-              --label "org.opencontainers.image.version=${CNB_TAG_NAME}" \
+              --label "org.opencontainers.image.version=${CNB_BRANCH}" \
               --label "org.opencontainers.image.revision=${CNB_COMMIT}" \
               --push \
               .
