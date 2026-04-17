@@ -12,13 +12,13 @@ $:
       runner:
         cpus: 4
       docker:
-        image: docker.cnb.cool/cnb/golang:1.26.2-bookworm
+        image: docker.io/library/golang:1.26.2-bookworm
       env:
         CGO_ENABLED: "0"
         GOFLAGS: "-mod=vendor"
       stages:
         - name: build-frontend
-          image: docker.cnb.cool/cnb/node:22-bookworm-slim
+          image: docker.io/library/node:22-bookworm-slim
           script: |
             set -eux
             cd web
@@ -57,13 +57,13 @@ $:
       runner:
         cpus: 4
       docker:
-        image: docker.cnb.cool/cnb/golang:1.26.2-bookworm
+        image: docker.io/library/golang:1.26.2-bookworm
       env:
         CGO_ENABLED: "0"
         GOFLAGS: "-mod=vendor"
       stages:
         - name: build-frontend
-          image: docker.cnb.cool/cnb/node:22-bookworm-slim
+          image: docker.io/library/node:22-bookworm-slim
           script: |
             set -eux
             cd web && npm ci && npm run build:ci
@@ -97,7 +97,7 @@ $:
       services:
         - docker
       docker:
-        image: docker.cnb.cool/cnb/docker:27
+        image: docker.io/library/docker:27
       env:
         DOCKER_BUILDKIT: "1"
       stages:
@@ -137,7 +137,7 @@ $:
       services:
         - docker
       docker:
-        image: docker.cnb.cool/cnb/docker:27
+        image: docker.io/library/docker:27
       env:
         DOCKER_BUILDKIT: "1"
       stages:
