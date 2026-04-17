@@ -23,9 +23,14 @@ func SetupRouter(staticFS embed.FS) *gin.Engine {
 	api.Use(middleware.CORS())
 	// 请求追踪与落库（含 X-Request-ID、body/headers、db_queries）；须在 CORS 之后以便 OPTIONS 不记日志
 	api.Use(middleware.RequestTrace())
+	// CSRF double-submit cookie：GET 自动下发 _csrf cookie，写请求校验 X-CSRF-Token
+	api.Use(middleware.CSRF())
 	// 操作审计写入 LogDB（与 service.Audit、GetLogs 一致）
 	api.Use(middleware.AuditLog())
 	{
+		// CSRF token 获取端点（前端初始化时拉一次即可）
+		api.GET("/csrf", middleware.IssueCSRFHandler)
+
 		api.POST("/login", handler.Login)
 		api.GET("/auth/captcha", handler.GetCaptcha)
 		api.GET("/auth/config", handler.GetAuthConfig)

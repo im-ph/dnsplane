@@ -9,15 +9,57 @@ export interface ApiResponse<T = unknown> {
   data?: T
 }
 
+/** 读取 document.cookie 中指定 name 的值；SSR 下返回空串 */
+function readCookie(name: string): string {
+  if (typeof document === 'undefined') return ''
+  const prefix = name + '='
+  for (const part of document.cookie.split(';')) {
+    const seg = part.trim()
+    if (seg.startsWith(prefix)) return decodeURIComponent(seg.slice(prefix.length))
+  }
+  return ''
+}
+
 class ApiClient {
   private token: string | null = null
   /** 并发 401 时合并为单次 refresh，避免 JTI 轮转导致多次刷新互相踩掉 */
   private refreshInFlight: Promise<boolean> | null = null
+  /** CSRF 令牌预取合并，避免首屏多个并发请求各自 bootstrap */
+  private csrfInFlight: Promise<string> | null = null
 
   constructor() {
     if (typeof window !== 'undefined') {
       this.token = localStorage.getItem('token')
     }
+  }
+
+  /**
+   * 获取 CSRF 令牌：优先读 cookie；不存在则 GET /api/csrf bootstrap。
+   * 后端 double-submit cookie 策略要求请求头与 _csrf cookie 同值。
+   */
+  private async ensureCSRFToken(): Promise<string> {
+    let tok = readCookie('_csrf')
+    if (tok) return tok
+    if (this.csrfInFlight) return this.csrfInFlight
+    this.csrfInFlight = (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/csrf`, {
+          method: 'GET',
+          credentials: 'include',
+        })
+        if (res.ok) {
+          const j = (await res.json()) as ApiResponse<{ token: string }>
+          if (j.code === 0 && j.data?.token) return j.data.token
+        }
+      } catch {
+        /* 网络错误时返回空值，让本次请求按原逻辑去失败；下次会重试 */
+      } finally {
+        this.csrfInFlight = null
+      }
+      return readCookie('_csrf')
+    })()
+    tok = await this.csrfInFlight
+    return tok
   }
 
   setToken(token: string | null) {
@@ -118,6 +160,12 @@ class ApiClient {
 
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`
+    }
+
+    // 非 GET 请求带上 double-submit CSRF 令牌，与服务端 _csrf cookie 同值
+    if (method !== 'GET' && method !== 'HEAD') {
+      const csrf = await this.ensureCSRFToken()
+      if (csrf) headers['X-CSRF-Token'] = csrf
     }
 
     const config: RequestInit = {
