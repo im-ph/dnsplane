@@ -212,12 +212,14 @@ Handler-->>Client : 加密响应
   "type": "aliyun",
   "name": "阿里云账户",
   "config": {
-    "access_key": "AKIAIOSFODNN7EXAMPLE",
-    "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    "AccessKeyId": "<YOUR_ALIYUN_ACCESS_KEY_ID>",
+    "AccessKeySecret": "<YOUR_ALIYUN_ACCESS_KEY_SECRET>"
   },
   "remark": "生产环境账户"
 }
 ```
+
+> 字段名与 `main/internal/dns/providers/aliyun/aliyun.go` 中 `ConfigField` 声明一致（`AccessKeyId` / `AccessKeySecret`）；不同 DNS 服务商的 `config` 键名不同，请以 `GET /api/dns/providers` 返回的 `config[].key` 为准。
 
 **响应格式**:
 ```json
