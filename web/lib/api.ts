@@ -365,10 +365,10 @@ export const accountApi = {
   list: (params?: { page?: number; page_size?: number; keyword?: string }) =>
     api.get<{ total: number; list: Account[] }>('/accounts', params),
   create: (data: Partial<Account>) => api.post<Account>('/accounts', data),
-  update: (id: number, data: Partial<Account>) => api.post<Account>(`/accounts/${id}`, data),
-  delete: (id: number) => api.post(`/accounts/${id}/delete`, {}),
-  check: (id: number) => api.post(`/accounts/${id}/check`),
-  getDomainList: (id: number, params?: { keyword?: string; page?: number; page_size?: number }) =>
+  update: (id: number | string, data: Partial<Account>) => api.post<Account>(`/accounts/${id}`, data),
+  delete: (id: number | string) => api.post(`/accounts/${id}/delete`, {}),
+  check: (id: number | string) => api.post(`/accounts/${id}/check`),
+  getDomainList: (id: number | string, params?: { keyword?: string; page?: number; page_size?: number }) =>
     api.get<{ total: number; list: DomainItem[] }>(`/accounts/${id}/domains`, params),
 }
 
@@ -381,8 +381,8 @@ export const domainApi = {
     api.post<Domain>('/domains', data),
   sync: (data: { aid: number; domains: { name: string; id: string; record_count: number }[] }) =>
     api.post('/domains/sync', data),
-  update: (id: number, data: Partial<Domain>) => api.post<Domain>(`/domains/${id}`, data),
-  delete: (id: number) => api.post(`/domains/${id}/delete`, {}),
+  update: (id: number | string, data: Partial<Domain>) => api.post<Domain>(`/domains/${id}`, data),
+  delete: (id: number | string) => api.post(`/domains/${id}/delete`, {}),
   /** 后端 BatchDomainActionRequest.ids 为 []string，此处统一转字符串 */
   batchAction: (data: {
     ids: (number | string)[]
@@ -394,12 +394,12 @@ export const domainApi = {
       ...data,
       ids: data.ids.map((id) => String(id)),
     }),
-  updateExpire: (id: number) => api.post(`/domains/${id}/update-expire`),
+  updateExpire: (id: number | string) => api.post(`/domains/${id}/update-expire`),
   batchUpdateExpire: (ids: number[]) =>
     api.post('/domains/batch/update-expire', { ids: ids.map((id) => String(id)) }),
-  getRecords: (id: number, params?: { page?: number; page_size?: number; keyword?: string; type?: string; line?: string }) =>
+  getRecords: (id: number | string, params?: { page?: number; page_size?: number; keyword?: string; type?: string; line?: string }) =>
     api.get<{ total: number; list: DNSRecord[] }>(`/domains/${id}/records`, params),
-  createRecord: (id: number, data: { name: string; type: string; value: string; line?: string; ttl?: number; mx?: number; remark?: string }) =>
+  createRecord: (id: number | string, data: { name: string; type: string; value: string; line?: string; ttl?: number; mx?: number; remark?: string }) =>
     api.post<DNSRecord>(`/domains/${id}/records`, data),
   updateRecord: (domainId: number, recordId: string, data: { name: string; type: string; value: string; line?: string; ttl?: number; mx?: number; remark?: string }) =>
     api.post<DNSRecord>(`/domains/${domainId}/records/${recordId}`, data),
@@ -407,17 +407,17 @@ export const domainApi = {
     api.post(`/domains/${domainId}/records/${recordId}/delete`, {}),
   setRecordStatus: (domainId: number, recordId: string, enable: boolean) =>
     api.post(`/domains/${domainId}/records/${recordId}/status`, { enable }),
-  getLines: (id: number) => api.get<RecordLine[]>(`/domains/${id}/lines`),
-  batchAddRecords: (id: number, data: { records: string; type?: string; line?: string; ttl?: number }) =>
+  getLines: (id: number | string) => api.get<RecordLine[]>(`/domains/${id}/lines`),
+  batchAddRecords: (id: number | string, data: { records: string; type?: string; line?: string; ttl?: number }) =>
     api.post(`/domains/${id}/records/batch`, data),
-  batchEditRecords: (id: number, data: { record_ids: string[]; action: string; [key: string]: unknown }) =>
+  batchEditRecords: (id: number | string, data: { record_ids: string[]; action: string; [key: string]: unknown }) =>
     api.post(`/domains/${id}/records/batch/edit`, data),
-  batchActionRecords: (id: number, data: { record_ids: string[]; action: string }) =>
+  batchActionRecords: (id: number | string, data: { record_ids: string[]; action: string }) =>
     api.post(`/domains/${id}/records/batch/action`, data),
-  queryWhois: (id: number) => api.post<WhoisInfo>(`/domains/${id}/whois`),
-  getLogs: (id: number, params?: { page?: number; page_size?: number }) =>
+  queryWhois: (id: number | string) => api.post<WhoisInfo>(`/domains/${id}/whois`),
+  getLogs: (id: number | string, params?: { page?: number; page_size?: number }) =>
     api.get<{ total: number; list: DomainLog[] }>(`/domains/${id}/logs`, params),
-  getQuickLoginURL: (id: number) => api.get<{ url: string }>(`/domains/${id}/loginurl`),
+  getQuickLoginURL: (id: number | string) => api.get<{ url: string }>(`/domains/${id}/loginurl`),
 }
 
 // Monitor APIs
@@ -425,20 +425,20 @@ export const monitorApi = {
   list: (params?: { page?: number; page_size?: number; keyword?: string; status?: number }) =>
     api.get<{ total: number; list: MonitorTask[] }>('/monitor/tasks', params),
   create: (data: Partial<MonitorTask>) => api.post<MonitorTask>('/monitor/tasks', data),
-  update: (id: number, data: Partial<MonitorTask>) => api.post<MonitorTask>(`/monitor/tasks/${id}`, data),
-  delete: (id: number) => api.post(`/monitor/tasks/${id}/delete`, {}),
-  toggle: (id: number, active: boolean) => api.post(`/monitor/tasks/${id}/toggle`, { active }),
-  switch: (id: number) => api.post(`/monitor/tasks/${id}/switch`, {}),
-  getLogs: (id: number, params?: { page?: number; page_size?: number; action?: number }) =>
+  update: (id: number | string, data: Partial<MonitorTask>) => api.post<MonitorTask>(`/monitor/tasks/${id}`, data),
+  delete: (id: number | string) => api.post(`/monitor/tasks/${id}/delete`, {}),
+  toggle: (id: number | string, active: boolean) => api.post(`/monitor/tasks/${id}/toggle`, { active }),
+  switch: (id: number | string) => api.post(`/monitor/tasks/${id}/switch`, {}),
+  getLogs: (id: number | string, params?: { page?: number; page_size?: number; action?: number }) =>
     api.get<{ total: number; list: MonitorLog[] }>(`/monitor/tasks/${id}/logs`, params),
   /** 探测历史（用于列表迷你条、详情图表），数据来自 LogDB 的 dm_check_logs */
-  getHistory: (id: number, period: '1h' | '24h' | '7d' | '30d' = '24h') =>
+  getHistory: (id: number | string, period: '1h' | '24h' | '7d' | '30d' = '24h') =>
     api.get<MonitorCheckPoint[]>(`/monitor/tasks/${id}/history`, { period }),
-  getUptime: (id: number) =>
+  getUptime: (id: number | string) =>
     api.get<Record<string, { total: number; success: number; uptime: number; avg_duration: number }>>(
       `/monitor/tasks/${id}/uptime`
     ),
-  getResolveStatus: (id: number) => api.get<unknown[]>(`/monitor/tasks/${id}/resolve-status`),
+  getResolveStatus: (id: number | string) => api.get<unknown[]>(`/monitor/tasks/${id}/resolve-status`),
   lookup: (domainId: number, subDomain: string) =>
     api.post<{ domain: string; account_type: string; records: unknown[] }>('/monitor/lookup', {
       domain_id: domainId,
@@ -463,8 +463,8 @@ export const certApi = {
     return api.get<CertAccount[]>('/cert/accounts', query)
   },
   createAccount: (data: Partial<CertAccount>) => api.post<CertAccount>('/cert/accounts', data),
-  updateAccount: (id: number, data: Partial<CertAccount>) => api.post<CertAccount>(`/cert/accounts/${id}`, data),
-  deleteAccount: (id: number) => api.post(`/cert/accounts/${id}/delete`, {}),
+  updateAccount: (id: number | string, data: Partial<CertAccount>) => api.post<CertAccount>(`/cert/accounts/${id}`, data),
+  deleteAccount: (id: number | string) => api.post(`/cert/accounts/${id}/delete`, {}),
   
   // Orders
   getOrders: (params?: { page?: number; page_size?: number; keyword?: string; aid?: number; status?: number }) =>
@@ -478,29 +478,29 @@ export const certApi = {
     /** ACME：dns-01 | http-01；通配符仅 dns-01；纯 IP 无需指定 */
     challenge_type?: string
   }) => api.post<CertOrder>('/cert/orders', data),
-  processOrder: (id: number, reset?: boolean) => api.post(`/cert/orders/${id}/process`, { reset }),
-  deleteOrder: (id: number) => api.post(`/cert/orders/${id}/delete`, {}),
-  getOrderLog: (id: number) => api.get<{ log: string }>(`/cert/orders/${id}/log`),
-  getOrderDetail: (id: number) => api.get<CertOrder>(`/cert/orders/${id}/detail`),
-  downloadOrder: (id: number, format: string) => api.get<{ content: string }>(`/cert/orders/${id}/download`, { format }),
-  toggleOrderAuto: (id: number, is_auto: boolean) => api.post(`/cert/orders/${id}/auto`, { is_auto }),
+  processOrder: (id: number | string, reset?: boolean) => api.post(`/cert/orders/${id}/process`, { reset }),
+  deleteOrder: (id: number | string) => api.post(`/cert/orders/${id}/delete`, {}),
+  getOrderLog: (id: number | string) => api.get<{ log: string }>(`/cert/orders/${id}/log`),
+  getOrderDetail: (id: number | string) => api.get<CertOrder>(`/cert/orders/${id}/detail`),
+  downloadOrder: (id: number | string, format: string) => api.get<{ content: string }>(`/cert/orders/${id}/download`, { format }),
+  toggleOrderAuto: (id: number | string, is_auto: boolean) => api.post(`/cert/orders/${id}/auto`, { is_auto }),
   
   // Deploys
   getDeploys: (params?: { page?: number; page_size?: number; keyword?: string; aid?: number; status?: number }) =>
     api.get<{ total: number; list: CertDeploy[] }>('/cert/deploys', params),
   createDeploy: (data: { account_id: number; order_id: number; config?: Record<string, string>; remark?: string }) => 
     api.post<CertDeploy>('/cert/deploys', data),
-  updateDeploy: (id: number, data: Partial<CertDeploy> | { account_id?: number; order_id?: number; config?: Record<string, string>; remark?: string; active?: boolean }) => 
+  updateDeploy: (id: number | string, data: Partial<CertDeploy> | { account_id?: number; order_id?: number; config?: Record<string, string>; remark?: string; active?: boolean }) => 
     api.post<CertDeploy>(`/cert/deploys/${id}`, data),
-  deleteDeploy: (id: number) => api.post(`/cert/deploys/${id}/delete`, {}),
-  processDeploy: (id: number, reset?: boolean) => api.post(`/cert/deploys/${id}/process`, { reset }),
+  deleteDeploy: (id: number | string) => api.post(`/cert/deploys/${id}/delete`, {}),
+  processDeploy: (id: number | string, reset?: boolean) => api.post(`/cert/deploys/${id}/process`, { reset }),
   
   // CNAMEs
   getCNAMEs: (params?: { page?: number; page_size?: number }) =>
     api.get<{ total: number; list: CertCNAME[] }>('/cert/cnames', params),
   createCNAME: (data: Partial<CertCNAME>) => api.post<CertCNAME>('/cert/cnames', data),
-  deleteCNAME: (id: number) => api.post(`/cert/cnames/${id}/delete`, {}),
-  verifyCNAME: (id: number) => api.post<{ status: number }>(`/cert/cnames/${id}/verify`),
+  deleteCNAME: (id: number | string) => api.post(`/cert/cnames/${id}/delete`, {}),
+  verifyCNAME: (id: number | string) => api.post<{ status: number }>(`/cert/cnames/${id}/verify`),
   
   // Providers - 返回 {cert: {...}, deploy: {...}} 格式
   getProviders: () => api.get<{ cert: Record<string, CertProviderConfig>; deploy: Record<string, CertProviderConfig> }>('/cert/providers'),
@@ -512,18 +512,18 @@ export const userApi = {
     api.get<{ total: number; list: User[] }>('/users', params),
   create: (data: Partial<User> & { password: string; permissions?: string[] }) =>
     api.post<User>('/users', data),
-  update: (id: number, data: Partial<User> & { password?: string; permissions?: string[] }) =>
+  update: (id: number | string, data: Partial<User> & { password?: string; permissions?: string[] }) =>
     api.post<User>(`/users/${id}`, data),
-  delete: (id: number) => api.post(`/users/${id}/delete`, {}),
-  getPermissions: (id: number) => api.get<UserPermission[]>(`/users/${id}/permissions`),
-  addPermission: (id: number, data: Partial<UserPermission>) => api.post(`/users/${id}/permissions`, data),
-  updatePermission: (id: number, permId: number, data: Partial<UserPermission>) => 
+  delete: (id: number | string) => api.post(`/users/${id}/delete`, {}),
+  getPermissions: (id: number | string) => api.get<UserPermission[]>(`/users/${id}/permissions`),
+  addPermission: (id: number | string, data: Partial<UserPermission>) => api.post(`/users/${id}/permissions`, data),
+  updatePermission: (id: number | string, permId: number | string, data: Partial<UserPermission>) => 
     api.post(`/users/${id}/permissions/${permId}`, data),
-  deletePermission: (id: number, permId: number) =>
+  deletePermission: (id: number | string, permId: number | string) =>
     api.post(`/users/${id}/permissions/${permId}/delete`, {}),
-  resetAPIKey: (id: number) => api.post<{ api_key: string }>(`/users/${id}/reset-apikey`),
-  sendResetEmail: (id: number, type: 'password' | 'totp') => api.post(`/users/${id}/send-reset`, { type }),
-  adminResetTOTP: (id: number) => api.post(`/users/${id}/reset-totp`),
+  resetAPIKey: (id: number | string) => api.post<{ api_key: string }>(`/users/${id}/reset-apikey`),
+  sendResetEmail: (id: number | string, type: 'password' | 'totp') => api.post(`/users/${id}/send-reset`, { type }),
+  adminResetTOTP: (id: number | string) => api.post(`/users/${id}/reset-totp`),
 }
 
 /** GET /logs 返回；兼容旧版 records 字段 */

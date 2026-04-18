@@ -10,9 +10,35 @@
 
 ---
 
-## v1.0.8 — 修复 CNB SCA 扫描发现的依赖 CVE + CI build 错误
+## v1.0.9 — 修复关 ignoreBuildErrors 后暴露的 id: number 类型不匹配
 
 - **提交**：_待分配_
+- **时间**：2026-04-18
+- **类型**：🟥 Fix（类型严格化）
+
+**[问题]**
+v1.0.8 后 CI 跑到新错误：
+```
+./app/(dashboard)/dashboard/domains/[id]/client.tsx:247:44
+Type error: Argument of type 'string' is not assignable to parameter of type 'number'.
+const res = await domainApi.getLines(domainId)
+```
+URL 路径参数 `domainId` 在 client 侧来自 `useParams`（永远是 `string`），
+但 `lib/api.ts` 中 47 处 API 方法签名声明 `id: number`。
+JavaScript 模板串字符串拼接对两种类型都正确，但 TypeScript 严格模式下报错。
+
+**[修复]**
+`lib/api.ts` 批量替换：
+- `(id: number,` → `(id: number | string,`
+- `(id: number)` → `(id: number | string)`
+- `permId: number` → `permId: number | string`
+共 47 处。URL path 参数本质上是字符串，两种类型都合理。
+
+---
+
+## v1.0.8 — 修复 CNB SCA 扫描发现的依赖 CVE + CI build 错误
+
+- **提交**：`59dacf8`
 - **时间**：2026-04-18
 - **类型**：🟥 Fix（依赖安全 + 构建）
 
